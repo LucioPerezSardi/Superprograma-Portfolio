@@ -1,0 +1,15 @@
+# Entorno/compilados
+.venv/
+__pycache__/
+*.pyc
+*.pyo
+
+# Datos locales
+data/backup/
+data/Combined_Market_Data.csv
+
+# IDE/OS
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db

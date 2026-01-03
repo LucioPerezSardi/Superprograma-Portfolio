@@ -1,0 +1,7 @@
+Simbolo,Broker,Tipo,Moneda,Cantidad,Precio_Promedio
+$,IOL,Efectivo Líquido,ARS,2000000.0,0.0
+MELI,IOL,CEDEARs,ARS,2.0,25205.700000000004
+$,BMB,Efectivo Líquido,ARS,1000000.0,0.0
+MSFT,BMB,CEDEARs,ARS,10.0,20164.56
+GGAL,IOL,Acciones AR,ARS,20.0,8065.8240000000005
+$,BINANCE,Criptomonedas,USD,0.005,90000.0
