@@ -1,20 +1,21 @@
-# Portfolio App (base)
+# Superprograma Portafolio V3.5
 
-PequeÃ±a app para seguimiento de portafolio con arquitectura modular en Python.
+App de escritorio (PyQt6 + matplotlib) para cargar y visualizar portafolio, operaciones y análisis. Persistencia en SQLite (`data/portfolio.db`). Los CSV legacy ya no se usan; solo se migran si la base está vacía.
 
-## Estructura
-- `portfolio_app/models`: entidades de dominio (activos, operaciones, portafolio).
-- `portfolio_app/data_providers`: proveedor de precios (`yfinance`).
-- `portfolio_app/services`: lÃ³gica de negocio y mÃ©tricas.
-- `portfolio_app/storage`: almacenamiento en memoria (intercambiable).
-- `portfolio_app/cli.py`: ejemplo de uso.
+## Estructura rápida
+- `PortafolioFinalV4.py`: ventana principal, wiring de pestañas, formularios y gráficas. Orquesta llamadas a servicios/DB.
+- `db_utils.py`: acceso a SQLite (init, CRUD de journal/analysis/portfolio, guardar/leer mercado).
+- `market_data.py`: descarga con Selenium y guarda datos de mercado en SQLite.
+- `app/ui/analysis_tab.py`: pestaña de Análisis (tabla de símbolos, revisiones, gráfico TradingView).
+- `services/portfolio.py`: lógica pura de cálculos (cash por broker, holdings, reconstrucción FIFO de operaciones finalizadas).
+- `requirements.txt`: dependencias.
+- `data/portfolio.db`: base de datos.
 
-## Setup
-1. Crear entorno: `python -m venv .venv` y activar (`.venv\Scripts\activate` en Windows).
-2. Instalar dependencias: `pip install -r requirements.txt`.
-3. Ejecutar demo: `python -m portfolio_app.cli` (desde la raÃ­z del proyecto).
+## Uso
+1) Crear y activar entorno: `python -m venv .venv` y `.venv\Scripts\activate` (Windows).
+2) Instalar: `pip install -r requirements.txt`.
+3) Ejecutar: `python PortafolioFinalV4.py`.
 
-## PrÃ³ximos pasos
-- AÃ±adir persistencia (CSV/SQLite) reemplazando `InMemoryStore`.
-- Agregar tests para `PortfolioService` y `MetricsService`.
-- Extender mÃ©tricas (volatilidad, Sharpe, drawdown) usando histÃ³rico de precios.
+## Notas
+- Los CSV (`journal/portfolio/Analisis/Combined_Market_Data`) pueden borrarse; sólo se leen para migrar si las tablas están vacías.
+- Ajusta la ruta de `chromedriver` en `market_data.py` si usas la descarga automática de mercado.
