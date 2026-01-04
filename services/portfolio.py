@@ -219,3 +219,130 @@ def compute_finished_operations(
         )
 
     return finished_ops
+
+
+def recompute_portfolio_rows(journal_rows: Iterable[dict]) -> List[dict]:
+    """
+    Recalcula el portafolio agregando todas las operaciones del journal.
+    Devuelve filas listas para guardar en la tabla `portfolio`.
+    """
+    portfolio = {}
+    for row in journal_rows:
+        tipo = row.get("tipo")
+        simbolo = row.get("simbolo")
+        tipo_operacion = row.get("tipo_operacion")
+        broker = row.get("broker") or "GENERAL"
+        moneda = row.get("moneda") or "ARS"
+        if not simbolo or not tipo_operacion:
+            continue
+
+        # Saltar efectivo líquido
+        if tipo in ["Depósito ARS", "Depósito USD", "DepІsito ARS", "DepІsito USD"]:
+            continue
+
+        try:
+            cantidad = _to_float(row.get("cantidad"))
+            costo_total = _to_float(row.get("costo_total"))
+        except Exception:
+            continue
+
+        key = (simbolo, broker)
+        if key not in portfolio:
+            portfolio[key] = {"tipo": tipo, "moneda": moneda, "cantidad": 0.0, "costo_acumulado": 0.0}
+
+        if tipo_operacion in ["Compra", "Entrada"]:
+            portfolio[key]["cantidad"] += cantidad
+            portfolio[key]["costo_acumulado"] += costo_total
+        elif tipo_operacion in ["Venta", "Salida"]:
+            if portfolio[key]["cantidad"] < cantidad or portfolio[key]["cantidad"] == 0:
+                continue
+            proporcion = cantidad / portfolio[key]["cantidad"]
+            costo_venta = portfolio[key]["costo_acumulado"] * proporcion
+            portfolio[key]["cantidad"] -= cantidad
+            portfolio[key]["costo_acumulado"] -= costo_venta
+
+    rows_to_save = []
+    for (simbolo, broker), data in portfolio.items():
+        if data["cantidad"] > 0:
+            precio_promedio = data["costo_acumulado"] / data["cantidad"]
+            rows_to_save.append(
+                {
+                    "simbolo": simbolo,
+                    "broker": broker,
+                    "tipo": data["tipo"],
+                    "moneda": data["moneda"],
+                    "cantidad": data["cantidad"],
+                    "precio_prom": precio_promedio,
+                }
+            )
+    return rows_to_save
+
+
+def next_plazo_fijo_number(journal_rows: Iterable[dict]) -> int:
+    counter = 1
+    for row in journal_rows:
+        if row.get("tipo") == "Plazo Fijo":
+            detalle = str(row.get("detalle", ""))
+            if detalle.startswith("Plazo Fijo "):
+                try:
+                    num = int(detalle.split(" ")[2])
+                    counter = max(counter, num + 1)
+                except Exception:
+                    continue
+    return counter
+def calcular_descuentos_y_totales(comision: float, derechos: float) -> dict:
+    iva_basico = comision * 0.21
+    iva_derechos = derechos * 0.21
+    total_descuentos = comision + iva_basico + derechos + iva_derechos
+    return {
+        "iva_basico": iva_basico,
+        "iva_derechos": iva_derechos,
+        "total_descuentos": total_descuentos,
+    }
+
+
+def calcular_operacion(tipo: str, tipo_op: str, cantidad: float, precio: float, rendimiento: float) -> dict:
+    total_sin_desc = cantidad * precio + rendimiento
+    comision = 0.0
+    derechos = 0.0
+    if tipo_op == "Rendimiento":
+        comision = 0.01 * total_sin_desc
+    elif tipo in ["Acciones AR", "CEDEARs", "ETFs"]:
+        comision = 0.006 * total_sin_desc
+        derechos = 0.0008 * total_sin_desc
+    elif tipo == "Bonos AR":
+        comision = 0.005 * total_sin_desc
+        derechos = 0.0001 * total_sin_desc
+
+    descuentos = calcular_descuentos_y_totales(comision, derechos)
+
+    if tipo in ["Depósito ARS", "Depósito USD", "DepІsito ARS", "DepІsito USD"]:
+        if tipo_op == "Entrada":
+            costo_total = 0
+            ingreso_total = total_sin_desc
+            balance = total_sin_desc
+        else:
+            costo_total = total_sin_desc
+            ingreso_total = 0
+            balance = -total_sin_desc
+    else:
+        if tipo_op in ["Compra", "Salida"]:
+            costo_total = total_sin_desc + descuentos["total_descuentos"]
+            ingreso_total = 0
+            balance = -costo_total
+        else:
+            costo_total = 0
+            ingreso_total = total_sin_desc - descuentos["total_descuentos"]
+            balance = ingreso_total
+
+    return {
+        "total_sin_desc": total_sin_desc,
+        "comision": comision,
+        "derechos": derechos,
+        "iva_basico": descuentos["iva_basico"],
+        "iva_derechos": descuentos["iva_derechos"],
+        "total_descuentos": descuentos["total_descuentos"],
+        "costo_total": costo_total,
+        "ingreso_total": ingreso_total,
+        "balance": balance,
+    }

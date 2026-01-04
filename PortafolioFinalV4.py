@@ -1,3 +1,4 @@
+﻿# -*- coding: utf-8 -*-
 import os
 import threading
 import pandas as pd
@@ -6,7 +7,7 @@ import numpy as np
 import sys
 import sqlite3
 
-# SOLUCIÓN AL PROBLEMA DE MATPLOTLIB/PYQT6
+# SOLUCION AL PROBLEMA DE MATPLOTLIB/PYQT6
 import matplotlib
 matplotlib.use('QtAgg')
 from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg
@@ -17,15 +18,14 @@ from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QTabWidget, QWidget, QVBoxLayout, QHBoxLayout, QGridLayout,
     QLabel, QLineEdit, QPushButton, QComboBox, QScrollArea, QFrame, QTableWidget,
     QTableWidgetItem, QHeaderView, QAbstractItemView, QMessageBox, QRadioButton,
-    QButtonGroup, QGroupBox, QAbstractScrollArea, QSizePolicy, QSplitter, 
-    QStyleFactory, QCheckBox  # Agregado QCheckBox
+    QButtonGroup, QGroupBox, QAbstractScrollArea, QSizePolicy, QSplitter,
+    QStyleFactory, QCheckBox
 )
-from PyQt6.QtCore import Qt, QSize, QUrl, QTimer, pyqtSignal, QThread  # Agregado QTimer
+from PyQt6.QtCore import Qt, QSize, QUrl, QTimer
 from PyQt6.QtGui import QColor, QFont, QBrush
 from PyQt6.QtWebEngineWidgets import QWebEngineView
 from PyQt6.QtWebEngineCore import QWebEngineSettings
 
-from market_data import descargar_datos_mercado
 from collections import deque
 from db_utils import (
     get_conn,
@@ -36,17 +36,22 @@ from db_utils import (
     fetch_analysis,
     save_analysis,
     replace_portfolio,
-    fetch_market_data,
     import_journal_from_csv,
     import_analysis_from_csv,
     import_portfolio_from_csv,
 )
-from app.ui.analysis_tab import AnalysisTab, ColorDelegate
+from app.ui.analysis_tab import AnalysisTab
+from app.ui.threads import DownloadThread
 from services.portfolio import (
     compute_cash_by_broker,
     compute_finished_operations,
     compute_holdings_by_broker,
+    recompute_portfolio_rows,
+    next_plazo_fijo_number,
+    calcular_operacion,
+    calcular_descuentos_y_totales,
 )
+from services.market import load_market_data, update_market_data
 
 # Configuracion de datos
 DATA_DIR = "data"
@@ -90,123 +95,64 @@ def init_files():
         except Exception as e:
             print(f"Error migrando portfolio.csv: {e}")
 
-class DownloadThread(QThread):
-    finished = pyqtSignal(bool, str)  # Señal para indicar finalización
-        
-    def __init__(self, data_dir):
-        super().__init__()
-        self.data_dir = data_dir
-            
-    def run(self):
-        try:
-            df = descargar_datos_mercado(self.data_dir)
-            if df is not None:
-                self.finished.emit(True, "Datos actualizados correctamente")
-            else:
-                self.finished.emit(False, "Error en la descarga")
-        except Exception as e:
-            self.finished.emit(False, f"Error: {str(e)}")
-
-    def on_download_finished(self, success, message):
-        self.actualizar_btn.setEnabled(True)
-        self.status_label.setText(message)
-        
-        if success:
-            self.cargar_datos_mercado()
-            self.load_portfolio()
-            self.load_finished_operations()
-        
-        # Reiniciar la actualización automática si está activa
-        if self.auto_update_active:
-            self.start_auto_update()
-            self.update_next_update_time()
-
-    def start_auto_update(self):
-        """Iniciar la actualización automática con cuenta regresiva"""
-        self.auto_update_timer.stop()
-        self.countdown_timer.stop()
-        
-        # Convertir minutos a milisegundos
-        interval_ms = self.auto_update_interval * 60 * 1000
-        self.auto_update_timer.start(interval_ms)
-        
-        # Iniciar cuenta regresiva (actualizar cada segundo)
-        self.remaining_time = self.auto_update_interval * 60
-        self.update_countdown()
-        self.countdown_timer.start(1000)
-    
-    def stop_auto_update(self):
-        """Detener la actualización automática"""
-        self.auto_update_timer.stop()
-        self.countdown_timer.stop()
-        self.countdown_label.setText("Próxima actualización: --:--")
-    
-    def update_next_update_time(self):
-        """Calcular y mostrar la hora de la próxima actualización"""
-        if self.auto_update_active:
-            next_time = datetime.now() + timedelta(minutes=self.auto_update_interval)
-            self.countdown_label.setText(
-                f"Próxima actualización: {next_time.strftime('%H:%M')}"
-            )
-
-# Clase principal de la aplicación
+# Clase principal de la aplicaciÃ³n
 class PortfolioAppQt(QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("Gestor de Portafolio de Inversiones")
         self.setGeometry(100, 100, 1400, 900)
-        
+
         init_files()
-        
+
         # Crear widget central y layout principal
         central_widget = QWidget()
         self.main_layout = QVBoxLayout(central_widget)
-        self.setCentralWidget(central_widget)  # <-- Añadir esta línea
+        self.setCentralWidget(central_widget)  # <-- AÃ±adir esta lÃ­nea
 
         self.df_mercado = None
         self.last_update = None
         self.cargar_datos_mercado()
         self.default_fx_rate = 1.0
-        
-        # Inicializar atributos para actualización automática
+
+        # Inicializar atributos para actualizaciÃ³n automÃ¡tica
         self.auto_update_interval = 5  # Valor por defecto en minutos
         self.auto_update_active = False
         self.remaining_time = 0  # Tiempo restante en segundos
-        
+
         self.auto_update_timer = QTimer(self)
         self.auto_update_timer.timeout.connect(self.actualizar_datos_mercado)
         self.countdown_timer = QTimer(self)  # Nuevo timer para cuenta regresiva
         self.countdown_timer.timeout.connect(self.update_countdown)
 
-        # Crear pestañas principales
+        # Crear pestaÃ±as principales
         self.tabs = QTabWidget()
         self.main_layout.addWidget(self.tabs)
-        
-        # Pestaña principal de Operaciones (contendrá subpestañas)
+
+        # PestaÃ±a principal de Operaciones (contendrÃ¡ subpestaÃ±as)
         self.operations_tab = QWidget()
         self.operations_tab_layout = QVBoxLayout(self.operations_tab)
         self.operations_inner_tabs = QTabWidget()
         self.operations_tab_layout.addWidget(self.operations_inner_tabs)
-        
-        # Crear subpestañas para Operaciones
+
+        # Crear subpestaÃ±as para Operaciones
         self.operation_subtab = QWidget()
         self.finished_ops_subtab = QWidget()
         self.journal_subtab = QWidget()
-        
-        self.operations_inner_tabs.addTab(self.operation_subtab, "Nueva Operación")
+
+        self.operations_inner_tabs.addTab(self.operation_subtab, "Nueva OperaciÃ³n")
         self.operations_inner_tabs.addTab(self.finished_ops_subtab, "Operaciones Finalizadas")
         self.operations_inner_tabs.addTab(self.journal_subtab, "Libro Diario")
-        
-        # Otras pestañas principales
+
+        # Otras pestaÃ±as principales
         self.portfolio_tab = QWidget()
         self.analysis_tab = AnalysisTab(self)
-        
-        # Agregar pestañas principales
+
+        # Agregar pestaÃ±as principales
         self.tabs.addTab(self.operations_tab, "Operaciones")
         self.tabs.addTab(self.portfolio_tab, "Portafolio Actual")
-        self.tabs.addTab(self.analysis_tab, "Análisis")
-        
-        # Inicializar subpestañas con los widgets existentes
+        self.tabs.addTab(self.analysis_tab, "AnÃ¡lisis")
+
+        # Inicializar subpestaÃ±as con los widgets existentes
         self.create_operation_form(self.operation_subtab)
         self.create_finished_ops_view(self.finished_ops_subtab)
         self.create_journal_view(self.journal_subtab)
@@ -218,34 +164,34 @@ class PortfolioAppQt(QMainWindow):
         self.load_portfolio()
         self.load_journal()
         self.plazo_fijo_counter = self.get_next_plazo_fijo_number()
-        
+
         self.tabs.currentChanged.connect(self.on_tab_changed)
-        # Conectar cambio de subpestañas en Operaciones
+        # Conectar cambio de subpestaÃ±as en Operaciones
         self.operations_inner_tabs.currentChanged.connect(self.on_inner_tab_changed)
 
     def update_countdown(self):
         """Actualizar la cuenta regresiva visual"""
         if self.remaining_time <= 0:
             return
-        
+
         self.remaining_time -= 1
         minutes = self.remaining_time // 60
         seconds = self.remaining_time % 60
         self.countdown_label.setText(
-            f"Próxima actualización en: {minutes:02d}:{seconds:02d}"
+            f"PrÃ³xima actualizaciÃ³n en: {minutes:02d}:{seconds:02d}"
         )
 
     def start_auto_update(self):
-        """Iniciar la actualización automática con cuenta regresiva"""
+        """Iniciar la actualizaciÃ³n automÃ¡tica con cuenta regresiva"""
         self.auto_update_timer.stop()
         self.countdown_timer.stop()
-        
+
         # Convertir minutos a milisegundos
         interval_ms = self.auto_update_interval * 60 * 1000
         self.auto_update_timer.start(interval_ms)
-        
+
         # Iniciar cuenta regresiva (actualizar cada segundo)
-        self.remaining_time = self.auto_update_interval * 60  # Inicializar aquí
+        self.remaining_time = self.auto_update_interval * 60  # Inicializar aquÃ­
         self.update_countdown()  # Actualizar inmediatamente
         self.countdown_timer.start(1000)
 
@@ -257,7 +203,7 @@ class PortfolioAppQt(QMainWindow):
                 self.load_finished_operations()
         elif tab_name == "Portafolio Actual":
             self.load_portfolio()
-        elif tab_name == "Análisis":
+        elif tab_name == "AnÃ¡lisis":
             self.analysis_tab.load_portfolio()
             self.analysis_tab.load_saved_data()
             self.analysis_tab.sort_tables()  # Actualizar ordenamiento
@@ -271,28 +217,28 @@ class PortfolioAppQt(QMainWindow):
 
     def create_finished_ops_view(self, parent_widget):
         layout = QVBoxLayout(parent_widget)
-        
+
         # Frame de controles
         control_frame = QFrame()
         control_layout = QHBoxLayout(control_frame)
-        
-        # Botón Actualizar
+
+        # BotÃ³n Actualizar
         self.update_finished_btn = QPushButton("Actualizar")
         self.update_finished_btn.clicked.connect(self.load_finished_operations)
         control_layout.addWidget(self.update_finished_btn)
-        
+
         # Grupo de filtros
         filter_group = QGroupBox("Filtro de Fechas")
         filter_layout = QHBoxLayout(filter_group)
-        
+
         self.show_all_radio = QRadioButton("Mostrar Todo")
         self.limit_radio = QRadioButton("Limitar")
         self.show_all_radio.setChecked(True)
-        
+
         filter_layout.addWidget(QLabel("Ver:"))
         filter_layout.addWidget(self.show_all_radio)
         filter_layout.addWidget(self.limit_radio)
-        
+
         # Campos de fecha
         filter_layout.addWidget(QLabel("Desde:"))
         self.from_date_edit = QLineEdit()
@@ -302,31 +248,31 @@ class PortfolioAppQt(QMainWindow):
         last_month = today - timedelta(days=30)
         self.from_date_edit.setText(last_month.strftime("%Y-%m-%d"))
         filter_layout.addWidget(self.from_date_edit)
-        
+
         filter_layout.addWidget(QLabel("Hasta:"))
         self.to_date_edit = QLineEdit()
         self.to_date_edit.setFixedWidth(100)
         self.to_date_edit.setEnabled(False)
         self.to_date_edit.setText(today.strftime("%Y-%m-%d"))
         filter_layout.addWidget(self.to_date_edit)
-        
-        # Botón aplicar filtro
+
+        # BotÃ³n aplicar filtro
         self.apply_filter_btn = QPushButton("Aplicar Filtro")
         self.apply_filter_btn.clicked.connect(self.load_finished_operations)
         filter_layout.addWidget(self.apply_filter_btn)
-        
+
         control_layout.addWidget(filter_group)
         layout.addWidget(control_frame)
-        
-        # Etiqueta de información de filtro
+
+        # Etiqueta de informaciÃ³n de filtro
         self.filter_info_label = QLabel()
         self.filter_info_label.setStyleSheet("color: blue;")
         layout.addWidget(self.filter_info_label)
-        
+
         # Conectar cambios en los radio buttons
         self.show_all_radio.toggled.connect(self.toggle_date_filter)
         self.limit_radio.toggled.connect(self.toggle_date_filter)
-        
+
         # Tabla de operaciones finalizadas
         self.finished_table = QTableWidget()
         self.finished_table.setColumnCount(10)
@@ -338,14 +284,14 @@ class PortfolioAppQt(QMainWindow):
         self.finished_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
         self.finished_table.verticalHeader().setVisible(False)
         self.finished_table.setSizeAdjustPolicy(QAbstractScrollArea.SizeAdjustPolicy.AdjustToContents)
-        
+
         layout.addWidget(self.finished_table)
-    
+
     def toggle_date_filter(self):
         enabled = self.limit_radio.isChecked()
         self.from_date_edit.setEnabled(enabled)
         self.to_date_edit.setEnabled(enabled)
-    
+
     def load_finished_operations(self):
         # Actualizar mensaje de filtro
         if self.show_all_radio.isChecked():
@@ -353,10 +299,10 @@ class PortfolioAppQt(QMainWindow):
         else:
             self.filter_info_label.setText(
                 f"Se muestran los resultados desde {self.from_date_edit.text()} hasta {self.to_date_edit.text()}")
-        
+
         # Limpiar tabla
         self.finished_table.setRowCount(0)
-        
+
         # Obtener fechas si se usa filtro
         from_date = None
         to_date = None
@@ -365,9 +311,9 @@ class PortfolioAppQt(QMainWindow):
                 from_date = datetime.strptime(self.from_date_edit.text(), "%Y-%m-%d")
                 to_date = datetime.strptime(self.to_date_edit.text(), "%Y-%m-%d")
             except:
-                QMessageBox.critical(self, "Error", "Formato de fecha inválido. Use YYYY-MM-DD")
+                QMessageBox.critical(self, "Error", "Formato de fecha invÃ¡lido. Use YYYY-MM-DD")
                 return
-        
+
         # Leer el libro diario completo desde la base
         try:
             journal_rows = fetch_journal()
@@ -382,7 +328,7 @@ class PortfolioAppQt(QMainWindow):
         total_descuentos = 0
         total_rendimiento = 0
         total_resultado = 0
-        
+
         for row_idx, op in enumerate(finished_ops):
             fecha = op['fecha']
             tipo = op['tipo']
@@ -394,12 +340,12 @@ class PortfolioAppQt(QMainWindow):
             descuentos = op['descuentos']
             rendimiento = op['rendimiento']
             resultado = op['resultado']
-            
+
             total_diferencia_valor += diferencia_valor
             total_descuentos += descuentos
             total_rendimiento += rendimiento
             total_resultado += resultado
-            
+
             self.finished_table.setItem(row_idx, 0, QTableWidgetItem(fecha))
             self.finished_table.setItem(row_idx, 1, QTableWidgetItem(tipo))
             self.finished_table.setItem(row_idx, 2, QTableWidgetItem(simbolo))
@@ -410,31 +356,31 @@ class PortfolioAppQt(QMainWindow):
             self.finished_table.setItem(row_idx, 7, QTableWidgetItem(f"${descuentos:,.2f}"))
             self.finished_table.setItem(row_idx, 8, QTableWidgetItem(f"${rendimiento:,.2f}"))
             self.finished_table.setItem(row_idx, 9, QTableWidgetItem(f"${resultado:,.2f}"))
-            
+
             # Color de texto
             if diferencia_valor > 0:
                 self.finished_table.item(row_idx, 6).setForeground(QColor('green'))
             elif diferencia_valor < 0:
                 self.finished_table.item(row_idx, 6).setForeground(QColor('red'))
-            
+
             # Descuentos siempre rojos
             self.finished_table.item(row_idx, 7).setForeground(QColor('red'))
-            
+
             if rendimiento > 0:
                 self.finished_table.item(row_idx, 8).setForeground(QColor('green'))
             elif rendimiento < 0:
                 self.finished_table.item(row_idx, 8).setForeground(QColor('red'))
-            
+
             if resultado > 0:
                 self.finished_table.item(row_idx, 9).setForeground(QColor('green'))
             elif resultado < 0:
                 self.finished_table.item(row_idx, 9).setForeground(QColor('red'))
-        
+
         # Agregar fila de totales
         if finished_ops:
             row_idx = self.finished_table.rowCount()
             self.finished_table.insertRow(row_idx)
-            
+
             # Crear items para la fila de totales
             items = [
                 QTableWidgetItem("TOTAL"),
@@ -448,14 +394,14 @@ class PortfolioAppQt(QMainWindow):
                 QTableWidgetItem(f"${total_rendimiento:,.2f}"),
                 QTableWidgetItem(f"${total_resultado:,.2f}")
             ]
-            
+
             # Aplicar formato a los items
             for i, item in enumerate(items):
-                if i >= 6:  # Columnas numéricas
+                if i >= 6:  # Columnas numÃ©ricas
                     font = QFont()
                     font.setBold(True)
                     item.setFont(font)
-                    
+
                     if i == 6:  # Diferencia de valor
                         if total_diferencia_valor > 0:
                             item.setForeground(QColor('green'))
@@ -473,66 +419,24 @@ class PortfolioAppQt(QMainWindow):
                             item.setForeground(QColor('green'))
                         elif total_resultado < 0:
                             item.setForeground(QColor('red'))
-                
+
                 item.setFlags(item.flags() & ~Qt.ItemFlag.ItemIsEditable)
                 self.finished_table.setItem(row_idx, i, item)
-    
+
     def recalcular_portfolio(self):
         """Recalcular completamente el portafolio desde el libro diario"""
-        portfolio = {}
-        
-        # Leer el libro diario
-        rows = fetch_journal()
-        for row in rows:
-            tipo = row['tipo']
-            simbolo = row['simbolo']
-            tipo_operacion = row['tipo_operacion']
-            broker = row.get('broker', BROKERS[0])
-            moneda = row.get('moneda', 'ARS')
-            
-            # Saltar efectivo líquido
-            if tipo in ["Depósito ARS", "Depósito USD"]:
-                continue
-            
-            try:
-                cantidad = float(row['cantidad'])
-                costo_total = float(row['costo_total'])
-            except:
-                continue
-            
-            key = (simbolo, broker)
-            if key not in portfolio:
-                portfolio[key] = {'tipo': tipo, 'moneda': moneda, 'cantidad': 0.0, 'costo_acumulado': 0.0}
-            
-            if tipo_operacion in ["Compra", "Entrada"]:
-                portfolio[key]['cantidad'] += cantidad
-                portfolio[key]['costo_acumulado'] += costo_total
-            elif tipo_operacion in ["Venta", "Salida"]:
-                if portfolio[key]['cantidad'] < cantidad:
-                    continue
-                proporcion = cantidad / portfolio[key]['cantidad']
-                costo_venta = portfolio[key]['costo_acumulado'] * proporcion
-                portfolio[key]['cantidad'] -= cantidad
-                portfolio[key]['costo_acumulado'] -= costo_venta
-        
-        # Escribir el portafolio recalculado en base de datos
-        rows_to_save = []
-        for (simbolo, broker), data in portfolio.items():
-            if data['cantidad'] > 0:
-                precio_promedio = data['costo_acumulado'] / data['cantidad']
-                rows_to_save.append({
-                    'simbolo': simbolo,
-                    'broker': broker,
-                    'tipo': data['tipo'],
-                    'moneda': data['moneda'],
-                    'cantidad': data['cantidad'],
-                    'precio_prom': precio_promedio
-                })
+        try:
+            journal_rows = fetch_journal()
+        except Exception as e:
+            print(f"Error leyendo journal: {e}")
+            return
+
+        rows_to_save = recompute_portfolio_rows(journal_rows)
         replace_portfolio(rows_to_save)
-    
+
     def cargar_datos_mercado(self):
         try:
-            self.df_mercado, self.last_update = fetch_market_data()
+            self.df_mercado, self.last_update = load_market_data()
             if self.df_mercado is not None and hasattr(self, 'status_label') and self.last_update:
                 self.status_label.setText(f"Ultima actualizacion: {self.last_update}")
             if self.df_mercado is None:
@@ -544,10 +448,10 @@ class PortfolioAppQt(QMainWindow):
     def actualizar_datos_mercado(self):
         if hasattr(self, 'update_thread') and self.update_thread.isRunning():
             return
-        
+
         self.actualizar_btn.setEnabled(False)
         self.status_label.setText("Descargando datos de mercado...")
-        
+
         # Usar QThread correctamente
         self.update_thread = DownloadThread(DATA_DIR)
         self.update_thread.finished.connect(self.on_download_finished)
@@ -556,53 +460,44 @@ class PortfolioAppQt(QMainWindow):
     def on_download_finished(self, success, message):
         self.actualizar_btn.setEnabled(True)
         self.status_label.setText(message)
-        
+
         if success:
             self.cargar_datos_mercado()
             self.load_portfolio()
             self.load_finished_operations()
-        
-        # Reiniciar actualización automática
+
+        # Reiniciar actualizaciÃ³n automÃ¡tica
         if self.auto_update_active:
             self.start_auto_update()
-    
+
     def get_next_plazo_fijo_number(self):
-        counter = 1
         try:
-            for row in fetch_journal():
-                if row.get("tipo") == "Plazo Fijo":
-                    detalle = str(row.get("detalle", ""))
-                    if detalle.startswith("Plazo Fijo "):
-                        try:
-                            num = int(detalle.split(" ")[2])
-                            if num >= counter:
-                                counter = num + 1
-                        except Exception:
-                            continue
+            journal_rows = fetch_journal()
+            return next_plazo_fijo_number(journal_rows)
         except Exception as e:
-            print(f"Error calculando prσximo plazo fijo: {e}")
-        return counter
-    
+            print(f"Error calculando prÃ³ximo plazo fijo: {e}")
+            return 1
+
     def create_operation_form(self, parent_widget):
         layout = QGridLayout(parent_widget)
         layout.setColumnStretch(1, 1)
         layout.setColumnStretch(3, 1)
-        
+
         # Variables para almacenar valores
         self.fecha_edit = QLineEdit(datetime.now().strftime("%Y-%m-%d"))
         self.tipo_combo = QComboBox()
-        self.tipo_combo.addItems(["Depósito ARS", "Depósito USD", "Plazo Fijo", "Acciones AR", "CEDEARs", "Bonos AR", "ETFs", "Criptomonedas", "FCIs AR", "Cauciones"])
+        self.tipo_combo.addItems(["DepÃ³sito ARS", "DepÃ³sito USD", "Plazo Fijo", "Acciones AR", "CEDEARs", "Bonos AR", "ETFs", "Criptomonedas", "FCIs AR", "Cauciones"])
         self.tipo_op_combo = QComboBox()
         self.broker_combo = QComboBox()
         self.broker_combo.addItems(BROKERS)
         self.simbolo_combo = QComboBox()
-        self.simbolo_combo.setEditable(True)  # Permitir edición para nuevos símbolos
+        self.simbolo_combo.setEditable(True)  # Permitir ediciÃ³n para nuevos sÃ­mbolos
         self.detalle_edit = QLineEdit()
         self.cantidad_edit = QLineEdit("0")
         self.precio_edit = QLineEdit("0")
         self.rendimiento_edit = QLineEdit("0")
         self.tc_edit = QLineEdit("1.0")
-        
+
         # Campos calculados
         self.total_sin_desc_label = QLineEdit()
         self.total_sin_desc_label.setReadOnly(True)
@@ -620,22 +515,22 @@ class PortfolioAppQt(QMainWindow):
         self.ingreso_total_label.setReadOnly(True)
         self.balance_label = QLineEdit()
         self.balance_label.setReadOnly(True)
-        
+
         # Botones
         self.calcular_btn = QPushButton("Calcular")
         self.guardar_btn = QPushButton("Guardar")
         self.limpiar_btn = QPushButton("Limpiar")
-        
+
         # Configurar layout
         layout.addWidget(QLabel("Fecha:"), 0, 0)
         layout.addWidget(self.fecha_edit, 0, 1)
         layout.addWidget(QLabel("Tipo*:"), 1, 0)
         layout.addWidget(self.tipo_combo, 1, 1)
-        layout.addWidget(QLabel("Tipo Operación*:"), 2, 0)
+        layout.addWidget(QLabel("Tipo OperaciÃ³n*:"), 2, 0)
         layout.addWidget(self.tipo_op_combo, 2, 1)
         layout.addWidget(QLabel("Broker*:"), 3, 0)
         layout.addWidget(self.broker_combo, 3, 1)
-        layout.addWidget(QLabel("Símbolo:"), 4, 0)
+        layout.addWidget(QLabel("SÃ­mbolo:"), 4, 0)
         layout.addWidget(self.simbolo_combo, 4, 1)
         layout.addWidget(QLabel("Detalle:"), 5, 0)
         layout.addWidget(self.detalle_edit, 5, 1)
@@ -647,11 +542,11 @@ class PortfolioAppQt(QMainWindow):
         layout.addWidget(self.rendimiento_edit, 8, 1)
         layout.addWidget(QLabel("TC USD/ARS:"), 9, 0)
         layout.addWidget(self.tc_edit, 9, 1)
-        
+
         # Campos calculados
         layout.addWidget(QLabel("Total sin descuentos:"), 0, 2)
         layout.addWidget(self.total_sin_desc_label, 0, 3)
-        layout.addWidget(QLabel("Comisión:"), 1, 2)
+        layout.addWidget(QLabel("ComisiÃ³n:"), 1, 2)
         layout.addWidget(self.comision_edit, 1, 3)
         layout.addWidget(QLabel("IVA 21%:"), 2, 2)
         layout.addWidget(self.iva_label, 2, 3)
@@ -667,17 +562,17 @@ class PortfolioAppQt(QMainWindow):
         layout.addWidget(self.ingreso_total_label, 7, 3)
         layout.addWidget(QLabel("Balance:"), 8, 2)
         layout.addWidget(self.balance_label, 8, 3)
-        
+
         # Botones
         button_layout = QHBoxLayout()
         button_layout.addWidget(self.calcular_btn)
         button_layout.addWidget(self.guardar_btn)
         button_layout.addWidget(self.limpiar_btn)
         layout.addLayout(button_layout, 10, 0, 1, 4)
-        
+
         layout.addWidget(QLabel("* Campos obligatorios"), 11, 0, 1, 4)
-        
-        # Conectar señales
+
+        # Conectar seÃ±ales
         self.tipo_combo.currentTextChanged.connect(self.on_tipo_change)
         self.tipo_op_combo.currentTextChanged.connect(self.on_tipo_op_change)
         self.broker_combo.currentTextChanged.connect(self.on_broker_change)
@@ -689,15 +584,15 @@ class PortfolioAppQt(QMainWindow):
         self.calcular_btn.clicked.connect(self.calcular)
         self.guardar_btn.clicked.connect(self.guardar_operacion)
         self.limpiar_btn.clicked.connect(self.limpiar_formulario)
-        
+
         # Inicializar estado
         self.on_tipo_change(self.tipo_combo.currentText())
-    
+
     def on_tipo_change(self, tipo):
-        # Limpiar y configurar combo de tipo de operación
+        # Limpiar y configurar combo de tipo de operaciÃ³n
         self.tipo_op_combo.clear()
 
-        if tipo == "Depósito ARS":
+        if tipo == "DepÃ³sito ARS":
             self.tipo_op_combo.addItems(["Entrada", "Salida"])
             self.simbolo_combo.setCurrentText("$")
             self.precio_edit.setText("1")
@@ -706,7 +601,7 @@ class PortfolioAppQt(QMainWindow):
             self.rendimiento_edit.setEnabled(False)
             self.tc_edit.setText("1.0")
             self.tc_edit.setEnabled(False)
-        elif tipo == "Depósito USD":
+        elif tipo == "DepÃ³sito USD":
             self.tipo_op_combo.addItems(["Entrada", "Salida"])
             self.simbolo_combo.setCurrentText("USD")
             self.precio_edit.setText("1")
@@ -739,17 +634,17 @@ class PortfolioAppQt(QMainWindow):
             self.rendimiento_edit.setEnabled(True)
             self.tc_edit.setEnabled(False)
             self.tc_edit.setText("1.0")
-        
+
         self.update_simbolo_combobox()
         self.calcular_on_change()
 
     def on_broker_change(self, _):
-        """Actualizar símbolos disponibles y recálculos cuando cambia el broker."""
+        """Actualizar sÃ­mbolos disponibles y recÃ¡lculos cuando cambia el broker."""
         self.update_simbolo_combobox()
         self.calcular_on_change()
 
     def update_simbolo_combobox(self):
-        """Rellena el combo de símbolos según broker y tipo actual."""
+        """Rellena el combo de sÃ­mbolos segÃºn broker y tipo actual."""
         current = self.simbolo_combo.currentText()
         tipo = self.tipo_combo.currentText()
         broker = self.broker_combo.currentText()
@@ -764,9 +659,9 @@ class PortfolioAppQt(QMainWindow):
                 cur = conn.execute(query, params)
                 symbols = [row["simbolo"] for row in cur.fetchall() if row["simbolo"]]
         except Exception as e:
-            print(f"Error actualizando símbolos: {e}")
+            print(f"Error actualizando sÃ­mbolos: {e}")
 
-        # Mantener el texto actual si no está en la lista
+        # Mantener el texto actual si no estÃ¡ en la lista
         if current and current not in symbols:
             symbols.insert(0, current)
 
@@ -778,7 +673,7 @@ class PortfolioAppQt(QMainWindow):
         self.simbolo_combo.blockSignals(False)
 
     def get_moneda_actual(self, tipo):
-        """Determina moneda base según tipo de operación."""
+        """Determina moneda base segÃºn tipo de operaciÃ³n."""
         if "USD" in tipo:
             return "USD"
         if tipo in ["Criptomonedas"]:
@@ -786,7 +681,7 @@ class PortfolioAppQt(QMainWindow):
         return "ARS"
 
     def calcular_on_change(self):
-        """Recalcula importes cuando cambian campos numéricos."""
+        """Recalcula importes cuando cambian campos numÃ©ricos."""
         try:
             self.calcular()
         except Exception:
@@ -794,8 +689,8 @@ class PortfolioAppQt(QMainWindow):
 
     def on_tipo_op_change(self, tipo_op):
         tipo = self.tipo_combo.currentText()
-        
-        # Habilitar/deshabilitar campos según operación
+
+        # Habilitar/deshabilitar campos segÃºn operaciÃ³n
         if tipo == "Plazo Fijo" and tipo_op == "Compra":
             simbolo = f"Plazo Fijo {self.plazo_fijo_counter}"
             self.simbolo_combo.setCurrentText(simbolo)
@@ -822,41 +717,38 @@ class PortfolioAppQt(QMainWindow):
                             self.cantidad_edit.setText(str(row["cantidad"]))
                 except Exception as e:
                     print(f"Error cargando cantidad de plazo fijo: {e}")
-    
+
     def calcular_descuentos(self):
         try:
-            comision = float(self.comision_edit.text().replace('.', '').replace(',', '.')) if self.comision_edit.text() else 0
-            derechos = float(self.derechos_edit.text().replace('.', '').replace(',', '.')) if self.derechos_edit.text() else 0
-            
-            iva_basico = comision * 0.21
-            iva_derechos = derechos * 0.21
-            total_descuentos = comision + iva_basico + derechos + iva_derechos
-            
+            comision = float(self.comision_edit.text().replace(".", "").replace(",", ".")) if self.comision_edit.text() else 0
+            derechos = float(self.derechos_edit.text().replace(".", "").replace(",", ".")) if self.derechos_edit.text() else 0
+            descuentos = calcular_descuentos_y_totales(comision, derechos)
+
             def format_number(num):
                 return f"{num:,.2f}".replace(',', 'X').replace('.', ',').replace('X', '.')
-            
-            self.iva_label.setText(format_number(iva_basico))
-            self.iva_derechos_label.setText(format_number(iva_derechos))
-            self.total_descuentos_label.setText(format_number(total_descuentos))
-            
+
+            self.iva_label.setText(format_number(descuentos["iva_basico"]))
+            self.iva_derechos_label.setText(format_number(descuentos["iva_derechos"]))
+            self.total_descuentos_label.setText(format_number(descuentos["total_descuentos"]))
+
             self.calcular_costos_ingresos()
-        except:
+        except Exception:
             pass
-    
+
     def calcular_costos_ingresos(self):
         try:
             tipo = self.tipo_combo.currentText()
             tipo_op = self.tipo_op_combo.currentText()
-            
+
             total_sin_desc = float(self.total_sin_desc_label.text().replace('.', '').replace(',', '.')) if self.total_sin_desc_label.text() else 0
             total_descuentos = float(self.total_descuentos_label.text().replace('.', '').replace(',', '.')) if self.total_descuentos_label.text() else 0
-            
-            if tipo in ["Depósito ARS", "Depósito USD"]:
+
+            if tipo in ["Deposito ARS", "Deposito USD", "Depósito ARS", "Depósito USD"]:
                 if tipo_op == "Entrada":
                     costo_total = 0
                     ingreso_total = total_sin_desc
                     balance = total_sin_desc
-                else:  # Salida
+                else:
                     costo_total = total_sin_desc
                     ingreso_total = 0
                     balance = -total_sin_desc
@@ -865,103 +757,79 @@ class PortfolioAppQt(QMainWindow):
                     costo_total = total_sin_desc + total_descuentos
                     ingreso_total = 0
                     balance = -costo_total
-                else:  # Venta, Entrada, Rendimiento
+                else:
                     costo_total = 0
                     ingreso_total = total_sin_desc - total_descuentos
                     balance = ingreso_total
-            
+
             def format_number(num):
                 return f"{num:,.2f}".replace(',', 'X').replace('.', ',').replace('X', '.')
-            
+
             self.costo_total_label.setText(format_number(costo_total))
             self.ingreso_total_label.setText(format_number(ingreso_total))
             self.balance_label.setText(format_number(balance))
-        except:
+        except Exception:
             pass
-    
+
     def calcular(self):
         try:
             tipo = self.tipo_combo.currentText()
             tipo_op = self.tipo_op_combo.currentText()
-            moneda = self.get_moneda_actual(tipo)
-            broker = self.broker_combo.currentText()
-            
             cantidad = float(self.cantidad_edit.text().replace(',', '.')) if self.cantidad_edit.text() else 0
             precio = float(self.precio_edit.text().replace(',', '.')) if self.precio_edit.text() else 0
             rendimiento = float(self.rendimiento_edit.text().replace(',', '.')) if self.rendimiento_edit.text() else 0
-            
-            # Calcular total sin descuentos
-            total_sin_desc = cantidad * precio + rendimiento
-            
-            # Calcular comisión y derechos automáticamente
-            comision = 0
-            derechos = 0
-            
-            if tipo_op == "Rendimiento":
-                comision = 0.01 * total_sin_desc
-            elif tipo in ["Acciones AR", "CEDEARs", "ETFs"]:
-                comision = 0.006 * total_sin_desc
-                derechos = 0.0008 * total_sin_desc
-            elif tipo == "Bonos AR":
-                comision = 0.005 * total_sin_desc
-                derechos = 0.0001 * total_sin_desc
-            
-            # Calcular campos dependientes
-            iva_basico = comision * 0.21
-            iva_derechos = derechos * 0.21
-            total_descuentos = comision + iva_basico + derechos + iva_derechos
-            
-            # Formatear valores
+
+            op = calcular_operacion(tipo, tipo_op, cantidad, precio, rendimiento)
+
             def format_number(num):
                 return f"{num:,.2f}".replace(',', 'X').replace('.', ',').replace('X', '.')
-            
-            # Establecer valores en los campos
-            self.total_sin_desc_label.setText(format_number(total_sin_desc))
-            self.comision_edit.setText(format_number(comision))
-            self.iva_label.setText(format_number(iva_basico))
-            self.derechos_edit.setText(format_number(derechos))
-            self.iva_derechos_label.setText(format_number(iva_derechos))
-            self.total_descuentos_label.setText(format_number(total_descuentos))
-            
-            # Calcular costos e ingresos
-            self.calcular_costos_ingresos()
+
+            self.total_sin_desc_label.setText(format_number(op["total_sin_desc"]))
+            self.comision_edit.setText(format_number(op["comision"]))
+            self.iva_label.setText(format_number(op["iva_basico"]))
+            self.derechos_edit.setText(format_number(op["derechos"]))
+            self.iva_derechos_label.setText(format_number(op["iva_derechos"]))
+            self.total_descuentos_label.setText(format_number(op["total_descuentos"]))
+            self.costo_total_label.setText(format_number(op["costo_total"]))
+            self.ingreso_total_label.setText(format_number(op["ingreso_total"]))
+            self.balance_label.setText(format_number(op["balance"]))
         except Exception as e:
-            QMessageBox.critical(self, "Error", f"Datos inválidos: {str(e)}")
-    
+            QMessageBox.critical(self, "Error", f"Datos invÃ¡lidos: {str(e)}")
+
     def guardar_operacion(self):
         try:
             if not (self.tipo_combo.currentText() and self.tipo_op_combo.currentText() and 
                     self.cantidad_edit.text() and self.precio_edit.text()):
                 QMessageBox.critical(self, "Error", "Complete todos los campos obligatorios (*)")
                 return
-            
+
             tipo = self.tipo_combo.currentText()
-            if tipo not in ["Depósito ARS", "Depósito USD"] and not self.simbolo_combo.currentText():
-                QMessageBox.critical(self, "Error", "El campo Símbolo es obligatorio para este tipo de instrumento")
+            if tipo not in ["DepÃ³sito ARS", "DepÃ³sito USD"] and not self.simbolo_combo.currentText():
+                QMessageBox.critical(self, "Error", "El campo SÃ­mbolo es obligatorio para este tipo de instrumento")
                 return
-            
+
             cantidad = float(self.cantidad_edit.text().replace(',', '.')) if self.cantidad_edit.text() else 0
             precio = float(self.precio_edit.text().replace(',', '.')) if self.precio_edit.text() else 0
             rendimiento = float(self.rendimiento_edit.text().replace(',', '.')) if self.rendimiento_edit.text() else 0
             tc_usd_ars = float(self.tc_edit.text().replace(',', '.')) if self.tc_edit.text() else 1.0
             tipo_op = self.tipo_op_combo.currentText()
             moneda = self.get_moneda_actual(tipo)
-            
-            # Validaciones específicas
+
+            # Validaciones especÃ­ficas
             if tipo == "Plazo Fijo" and tipo_op == "Venta":
                 if rendimiento == 0:
                     QMessageBox.critical(self, "Error", "Para venta de Plazo Fijo debe ingresar el Rendimiento")
                     return
-            
+
             if cantidad < 0 or precio < 0:
                 QMessageBox.critical(self, "Error", "Cantidad y Precio deben ser valores positivos")
                 return
-            
+
             fecha = self.fecha_edit.text()
             simbolo = self.simbolo_combo.currentText()
             detalle = self.detalle_edit.text()
             broker = self.broker_combo.currentText() or "GENERAL"
-            
+
             # Validar cantidad para ventas (por broker)
             if tipo_op == "Venta":
                 simbolo = self.simbolo_combo.currentText()
@@ -987,10 +855,10 @@ class PortfolioAppQt(QMainWindow):
             costo_total = float(self.costo_total_label.text().replace('.', '').replace(',', '.')) if self.costo_total_label.text() else 0
             ingreso_total = float(self.ingreso_total_label.text().replace('.', '').replace(',', '.')) if self.ingreso_total_label.text() else 0
             balance = float(self.balance_label.text().replace('.', '').replace(',', '.')) if self.balance_label.text() else 0
-            
+
             # Validar liquidez por broker (solo egresos netos)
             delta_cash = ingreso_total - costo_total
-            if not (tipo in ["Depósito ARS", "Depósito USD"] and tipo_op == "Entrada"):  # Entradas siempre permitidas
+            if not (tipo in ["DepÃ³sito ARS", "DepÃ³sito USD"] and tipo_op == "Entrada"):  # Entradas siempre permitidas
                 cash_by_broker = self.get_cash_by_broker(moneda)
                 disponible_broker = cash_by_broker.get(broker, 0.0)
                 if delta_cash < 0 and (disponible_broker + delta_cash) < -0.0001:
@@ -1027,7 +895,7 @@ class PortfolioAppQt(QMainWindow):
                 'moneda': moneda,
                 'tc_usd_ars': tc_usd_ars
             })
-            
+
             # Actualizar compras pendientes
             if tipo_op == "Compra":
                 if simbolo not in self.compras_pendientes:
@@ -1043,23 +911,23 @@ class PortfolioAppQt(QMainWindow):
                     else:
                         self.compras_pendientes[simbolo][0] = (primera_compra[0] - cantidad_a_vender, primera_compra[1])
                         cantidad_a_vender = 0
-            
+
             # Recalcular el portafolio
             self.recalcular_portfolio()
-            
-            QMessageBox.information(self, "Éxito", "Operación registrada correctamente")
+
+            QMessageBox.information(self, "Ã‰xito", "OperaciÃ³n registrada correctamente")
             self.limpiar_formulario()
             self.load_journal()
             self.load_portfolio()
             self.load_finished_operations()
-            
-            # Actualizar pestaña de Análisis
+
+            # Actualizar pestaÃ±a de AnÃ¡lisis
             self.analysis_tab.load_portfolio()
             self.analysis_tab.load_saved_data()
             self.analysis_tab.sort_tables()
         except Exception as e:
             QMessageBox.critical(self, "Error", f"Error al guardar: {str(e)}")
-    
+
     def limpiar_formulario(self):
         self.tipo_combo.setCurrentIndex(0)
         self.tipo_op_combo.clear()
@@ -1069,11 +937,11 @@ class PortfolioAppQt(QMainWindow):
         self.cantidad_edit.setText("0")
         self.precio_edit.setText("0")
         self.rendimiento_edit.setText("0")
-        
+
         self.precio_edit.setEnabled(True)
         self.rendimiento_edit.setEnabled(True)
         self.cantidad_edit.setEnabled(True)
-        
+
         self.total_sin_desc_label.clear()
         self.comision_edit.clear()
         self.iva_label.clear()
@@ -1083,29 +951,29 @@ class PortfolioAppQt(QMainWindow):
         self.costo_total_label.clear()
         self.ingreso_total_label.clear()
         self.balance_label.clear()
-    
+
     def create_portfolio_view(self, parent_widget):
         layout = QVBoxLayout(parent_widget)
-        
-        # Crear pestañas internas
+
+        # Crear pestaÃ±as internas
         self.portfolio_tabs = QTabWidget()
         layout.addWidget(self.portfolio_tabs)
-        
+
         # Tabla
         self.table_tab = QWidget()
         self.table_layout = QVBoxLayout(self.table_tab)
-        
+
         self.portfolio_table = QTableWidget()
         self.portfolio_table.setColumnCount(13)
         self.portfolio_table.setHorizontalHeaderLabels([
-            "Categoría",
-            "Símbolo",
+            "CategorÃ­a",
+            "SÃ­mbolo",
             "Moneda",
             "Cantidad\nNominal",
-            "Variación\nDiaria",
-            "Precio Operación\nde Compra",
-            "Valor Operación\nde Compra",
-            "Precio\nÚltimo Operado",
+            "VariaciÃ³n\nDiaria",
+            "Precio OperaciÃ³n\nde Compra",
+            "Valor OperaciÃ³n\nde Compra",
+            "Precio\nÃšltimo Operado",
             "Valor\nActual (moneda)",
             "Valor ARS",
             "Valor USD",
@@ -1115,27 +983,27 @@ class PortfolioAppQt(QMainWindow):
         self.portfolio_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
         self.portfolio_table.verticalHeader().setVisible(False)
         self.portfolio_table.setSizeAdjustPolicy(QAbstractScrollArea.SizeAdjustPolicy.AdjustToContents)
-        
+
         self.table_layout.addWidget(self.portfolio_table)
-        
-        # Gráfico
+
+        # GrÃ¡fico
         self.chart_tab = QWidget()
         self.chart_layout = QHBoxLayout(self.chart_tab)
-        
+
         self.category_chart_widget = QWidget()
         self.category_chart_layout = QVBoxLayout(self.category_chart_widget)
-        
+
         self.symbol_chart_widget = QWidget()
         self.symbol_chart_layout = QVBoxLayout(self.symbol_chart_widget)
-        self.symbol_chart_label = QLabel("Seleccione una categoría para ver detalles")
+        self.symbol_chart_label = QLabel("Seleccione una categorÃ­a para ver detalles")
         self.symbol_chart_layout.addWidget(self.symbol_chart_label)
-        
+
         self.chart_layout.addWidget(self.category_chart_widget)
         self.chart_layout.addWidget(self.symbol_chart_widget)
-        
-        # Añadir pestañas
+
+        # AÃ±adir pestaÃ±as
         self.portfolio_tabs.addTab(self.table_tab, "Tabla")
-        self.portfolio_tabs.addTab(self.chart_tab, "Gráfico")
+        self.portfolio_tabs.addTab(self.chart_tab, "GrÃ¡fico")
 
         # 1) Marco y layout principal de controles
         control_frame  = QFrame()
@@ -1143,12 +1011,12 @@ class PortfolioAppQt(QMainWindow):
         control_layout.setSpacing(10)
         control_layout.setContentsMargins(0, 0, 0, 0)
 
-        # 2) Botón “Actualizar Datos”
+        # 2) BotÃ³n â€œActualizar Datosâ€
         self.actualizar_btn = QPushButton("Actualizar Datos")
         self.actualizar_btn.clicked.connect(self.actualizar_datos_mercado)
         control_layout.addWidget(self.actualizar_btn)
 
-        # 3) Bloque de auto‑actualización con QGridLayout
+        # 3) Bloque de autoâ€‘actualizaciÃ³n con QGridLayout
         auto_frame  = QFrame()
         auto_layout = QGridLayout(auto_frame)
         auto_layout.setContentsMargins(0, 0, 0, 0)
@@ -1156,11 +1024,11 @@ class PortfolioAppQt(QMainWindow):
         auto_layout.setVerticalSpacing(0)
 
         #   Fila 0: checkbox ocupando ambas columnas
-        self.auto_update_check = QCheckBox("Actualización Automática")
+        self.auto_update_check = QCheckBox("ActualizaciÃ³n AutomÃ¡tica")
         self.auto_update_check.stateChanged.connect(self.toggle_auto_update)
         auto_layout.addWidget(self.auto_update_check, 0, 0, 1, 2, alignment=Qt.AlignmentFlag.AlignLeft)
 
-        #   Fila 1: “Intervalo (min):” + campo de texto
+        #   Fila 1: â€œIntervalo (min):â€ + campo de texto
         self.interval_label = QLabel("Intervalo (min):")
         self.interval_edit  = QLineEdit(str(self.auto_update_interval))
         self.interval_edit.setFixedWidth(40)
@@ -1168,19 +1036,19 @@ class PortfolioAppQt(QMainWindow):
         auto_layout.addWidget(self.interval_label, 1, 0, alignment=Qt.AlignmentFlag.AlignLeft)
         auto_layout.addWidget(self.interval_edit,  1, 1, alignment=Qt.AlignmentFlag.AlignLeft)
 
-        #   Fila 2: cuenta atrás “Próxima actualización”
-        self.countdown_label = QLabel("Próxima actualización: --:--")
+        #   Fila 2: cuenta atrÃ¡s â€œPrÃ³xima actualizaciÃ³nâ€
+        self.countdown_label = QLabel("PrÃ³xima actualizaciÃ³n: --:--")
         auto_layout.addWidget(self.countdown_label, 2, 0, 1, 2, alignment=Qt.AlignmentFlag.AlignLeft)
 
         control_layout.addWidget(auto_frame)
 
-        # 4) Grupo vertical para “Última actualización”
+        # 4) Grupo vertical para â€œÃšltima actualizaciÃ³nâ€
         status_group = QVBoxLayout()
         status_group.setSpacing(0)
         status_group.setContentsMargins(0, 0, 0, 0)
 
         self.status_label = QLabel(
-            f"Última actualización: {self.last_update if self.last_update else '-'}"
+            f"Ãšltima actualizaciÃ³n: {self.last_update if self.last_update else '-'}"
         )
         status_group.addWidget(self.status_label, alignment=Qt.AlignmentFlag.AlignLeft)
 
@@ -1196,10 +1064,10 @@ class PortfolioAppQt(QMainWindow):
 
         control_layout.addLayout(status_group)
 
-        # 5) Stretch para empujar el botón final a la derecha
+        # 5) Stretch para empujar el botÃ³n final a la derecha
         control_layout.addStretch()
 
-        # 6) Botón “Actualizar Portafolio”
+        # 6) BotÃ³n â€œActualizar Portafolioâ€
         self.update_portfolio_btn = QPushButton("Actualizar Portafolio")
         self.update_portfolio_btn.clicked.connect(self.load_portfolio)
         control_layout.addWidget(self.update_portfolio_btn)
@@ -1207,9 +1075,9 @@ class PortfolioAppQt(QMainWindow):
         # 7) Insertar todo en el layout global de la ventana/dialog
         layout.addWidget(control_frame)
 
-        # Conectar cambio de pestaña
+        # Conectar cambio de pestaÃ±a
         self.portfolio_tabs.currentChanged.connect(self.on_portfolio_tab_changed)
-    
+
     def toggle_auto_update(self, state):
         self.auto_update_active = (state == Qt.CheckState.Checked.value)
         if self.auto_update_active:
@@ -1221,8 +1089,8 @@ class PortfolioAppQt(QMainWindow):
         """Intenta obtener un tipo de cambio MEP desde los datos de mercado usando AL30/AL30D"""
         fx_rate = 1.0
         if self.df_mercado is not None:
-            symbol_col = next((c for c in ["Símbolo.1", "Símbolo", "Simbolo", "Symbol", "Ticker"] if c in self.df_mercado.columns), None)
-            price_col = next((c for c in ["Último Operado", "Ultimo Operado", "Precio", "Close"] if c in self.df_mercado.columns), None)
+            symbol_col = next((c for c in ["SÃ­mbolo.1", "SÃ­mbolo", "Simbolo", "Symbol", "Ticker"] if c in self.df_mercado.columns), None)
+            price_col = next((c for c in ["Ãšltimo Operado", "Ultimo Operado", "Precio", "Close"] if c in self.df_mercado.columns), None)
             if symbol_col and price_col:
                 try:
                     al30 = self.df_mercado[self.df_mercado[symbol_col] == "AL30"].iloc[0][price_col]
@@ -1251,27 +1119,27 @@ class PortfolioAppQt(QMainWindow):
             pass
 
     def start_auto_update(self):
-        """Iniciar la actualización automática con cuenta regresiva"""
+        """Iniciar la actualizaciÃ³n automÃ¡tica con cuenta regresiva"""
         self.auto_update_timer.stop()
         self.countdown_timer.stop()
-        
+
         # Convertir minutos a milisegundos
         interval_ms = self.auto_update_interval * 60 * 1000
         self.auto_update_timer.start(interval_ms)
-        
+
         # Iniciar cuenta regresiva
         self.remaining_time = self.auto_update_interval * 60
         self.update_countdown()
         self.countdown_timer.start(1000)
 
     def stop_auto_update(self):
-        """Detener la actualización automática"""
+        """Detener la actualizaciÃ³n automÃ¡tica"""
         self.auto_update_timer.stop()
         self.countdown_timer.stop()
-        self.countdown_label.setText("Próxima actualización: --:--")
+        self.countdown_label.setText("PrÃ³xima actualizaciÃ³n: --:--")
 
     def on_portfolio_tab_changed(self, index):
-        if self.portfolio_tabs.tabText(index) == "Gráfico":
+        if self.portfolio_tabs.tabText(index) == "GrÃ¡fico":
             self.draw_category_pie_chart()
 
     def get_cash_by_broker(self, moneda="ARS"):
@@ -1335,14 +1203,14 @@ class PortfolioAppQt(QMainWindow):
                     plazo_fijo_detalles[simbolo] = row.get("detalle", "")
         except Exception as e:
             print(f"Error leyendo journal para portfolio: {e}")
-        
+
         # Calcular efectivo por moneda/broker
         cash_by_broker_ars = self.get_cash_by_broker("ARS")
         cash_by_broker_usd = self.get_cash_by_broker("USD")
         fx_rate = self.detect_fx_rate()
 
         portfolio_data = []
-        # Inicializar total_valor a 0 (se calculará después)
+        # Inicializar total_valor a 0 (se calcularÃ¡ despuÃ©s)
         total_valor = 0.0
         tipo_valores = {}
 
@@ -1367,13 +1235,13 @@ class PortfolioAppQt(QMainWindow):
                 'simbolo_display': f"Efectivo ({broker})",
                 'detalle': f"Liquidez en {broker}",
                 'precio_prom': 1.0,
-                'cantidad': 0,  # no aplica cantidad única
+                'cantidad': 0,  # no aplica cantidad Ãºnica
                 'precio_actual': 1.0,
                 'variacion_diaria': 0.0,
                 'monto_ars': amounts.get('ars', 0.0),
                 'monto_usd': amounts.get('usd', 0.0)
             })
-        
+
         # Cargar otros activos
         # Cargar otros activos desde base de datos
         with get_conn() as conn:
@@ -1402,9 +1270,9 @@ class PortfolioAppQt(QMainWindow):
                     'precio_prom': precio_prom,
                     'cantidad': cantidad
                 })
-        
-        # Filtrar entradas obsoletas de "Efectivo Líquido"
-        portfolio_data = [p for p in portfolio_data if p.get('tipo') != "Efectivo Líquido"]
+
+        # Filtrar entradas obsoletas de "Efectivo LÃ­quido"
+        portfolio_data = [p for p in portfolio_data if p.get('tipo') != "Efectivo LÃ­quido"]
 
         # Calcular los valores para cada activo
         total_valor_ars = 0.0
@@ -1421,7 +1289,7 @@ class PortfolioAppQt(QMainWindow):
                 item['valor_actual'] = item['cantidad'] * item['precio_actual']
                 item['diferencia_valor'] = item['valor_actual'] - item['valor_compra']
                 item['variacion_diaria'] = 0.0
-            
+
             # Para Plazo Fijo
             elif item['tipo'] == "Plazo Fijo":
                 item['precio_operacion_compra'] = 1.0
@@ -1430,7 +1298,7 @@ class PortfolioAppQt(QMainWindow):
                 item['valor_actual'] = item['cantidad'] * item['precio_actual']
                 item['diferencia_valor'] = item['valor_actual'] - item['valor_compra']
                 item['variacion_diaria'] = 0.0
-                
+
             else:  # Para otros activos
                 if item['simbolo'] in self.compras_pendientes and self.compras_pendientes[item['simbolo']]:
                     total_cantidad = sum([compra[0] for compra in self.compras_pendientes[item['simbolo']]])
@@ -1441,10 +1309,10 @@ class PortfolioAppQt(QMainWindow):
                         item['precio_operacion_compra'] = 0
                 else:
                     item['precio_operacion_compra'] = 0
-                
+
                 item['valor_compra'] = item['cantidad'] * item['precio_operacion_compra']
-                
-                # Obtener precio actual y variación diaria del mercado
+
+                # Obtener precio actual y variaciÃ³n diaria del mercado
                 item['precio_actual'] = None
                 item['variacion_diaria'] = None
                 if self.df_mercado is not None:
@@ -1453,9 +1321,9 @@ class PortfolioAppQt(QMainWindow):
                         simbolo = simbolo.split("(")[0].strip()
 
                     # Buscar columnas disponibles en el CSV de mercado
-                    symbol_col = next((c for c in ["Símbolo.1", "Símbolo", "Simbolo", "Symbol", "Ticker"] if c in self.df_mercado.columns), None)
-                    price_col = next((c for c in ["Último Operado", "Ultimo Operado", "Precio", "Close"] if c in self.df_mercado.columns), None)
-                    var_col = next((c for c in ["Variación Diaria", "Variacion Diaria", "Var.%", "Variacion", "Change %"] if c in self.df_mercado.columns), None)
+                    symbol_col = next((c for c in ["SÃ­mbolo.1", "SÃ­mbolo", "Simbolo", "Symbol", "Ticker"] if c in self.df_mercado.columns), None)
+                    price_col = next((c for c in ["Ãšltimo Operado", "Ultimo Operado", "Precio", "Close"] if c in self.df_mercado.columns), None)
+                    var_col = next((c for c in ["VariaciÃ³n Diaria", "Variacion Diaria", "Var.%", "Variacion", "Change %"] if c in self.df_mercado.columns), None)
 
                     if symbol_col and price_col:
                         match = self.df_mercado[self.df_mercado[symbol_col] == simbolo]
@@ -1484,18 +1352,18 @@ class PortfolioAppQt(QMainWindow):
                                 item['variacion_diaria'] = float(variacion) if variacion not in (None, "") else None
                             except Exception:
                                 item['variacion_diaria'] = None
-                
+
                 if item['precio_actual'] is not None:
                     item['valor_actual'] = item['cantidad'] * item['precio_actual']
                 else:
                     item['valor_actual'] = item['valor_compra']
-                
+
                 item['diferencia_valor'] = item['valor_actual'] - item['valor_compra']
-            
+
             # Calcular descuentos totales
             descuento_total = descuentos_por_simbolo.get(item['simbolo'], 0)
-            
-            # Calcular descuento adicional según tipo
+
+            # Calcular descuento adicional segÃºn tipo
             if item['tipo'] in ["Acciones AR", "CEDEARs", "ETFs" , "Criptomonedas"]:
                 if item['valor_actual'] is not None:
                     descuento_adicional = 0.008228 * item['valor_actual']
@@ -1510,10 +1378,10 @@ class PortfolioAppQt(QMainWindow):
                 item['descuentos'] = descuento_total + descuento_adicional
             else:  # Efectivo, Plazo Fijo
                 item['descuentos'] = 0
-            
+
             # Calcular rendimientos acumulados
             item['rendimientos'] = rendimientos_por_simbolo.get(item['simbolo'], 0.0)
-            
+
             # Calcular resultado
             item['resultado'] = item['diferencia_valor'] - item['descuentos'] + item['rendimientos']
 
@@ -1545,7 +1413,7 @@ class PortfolioAppQt(QMainWindow):
         moneda_seleccionada = filtro_moneda.currentText() if filtro_moneda else "Todos"
         if moneda_seleccionada != "Todos":
             portfolio_data = [p for p in portfolio_data if p.get('moneda', 'ARS') == moneda_seleccionada or (p['tipo'] == "Efectivo" and p.get('moneda', 'ARS') == moneda_seleccionada)]
-            # Recalcular categorías con el filtro aplicado
+            # Recalcular categorÃ­as con el filtro aplicado
             tipo_valores = {}
             for p in portfolio_data:
                 tipo_valores[p['tipo']] = tipo_valores.get(p['tipo'], 0) + p.get('valor_ars', 0)
@@ -1555,7 +1423,7 @@ class PortfolioAppQt(QMainWindow):
         else:
             total_valor = total_valor_ars
 
-        # Orden de categorías
+        # Orden de categorÃ­as
         orden_categorias = {
             "Liquidez Actual": 0,
             "Plazo Fijo": 1,
@@ -1567,36 +1435,36 @@ class PortfolioAppQt(QMainWindow):
             "Criptomonedas": 7,
             "Cauciones": 8
         }
-        
+
         categorias = {}
         for item in portfolio_data:
             cat = item['tipo']
             # Renombrar efectivo a Liquidez Actual
-            if cat in ["Efectivo", "Efectivo Líquido"]:
+            if cat in ["Efectivo", "Efectivo LÃ­quido"]:
                 cat = "Liquidez Actual"
             if cat not in categorias:
                 categorias[cat] = []
             categorias[cat].append(item)
-        
-        # Guardar datos para gráficos
+
+        # Guardar datos para grÃ¡ficos
         self.portfolio_data = portfolio_data
         self.categorias = categorias
         self.total_valor = total_valor
         self.total_valor_usd = total_valor_usd
-        
+
         # Construir la tabla
         row_idx = 0
         total_valor_actual = 0
         total_resultado = 0
         total_valor_usd_tabla = 0
         suma_porcentajes = 0.0
-        
-        # Recorrer categorías en el orden definido
+
+        # Recorrer categorÃ­as en el orden definido
         for cat in sorted(categorias.keys(), key=lambda x: orden_categorias.get(x, 10)):
             items = categorias[cat]
             cat_total_ars = sum(item['valor_ars'] for item in items)
 
-            # Fila de categoría
+            # Fila de categorÃ­a
             self.portfolio_table.insertRow(row_idx)
             self.portfolio_table.setItem(row_idx, 0, QTableWidgetItem(cat))
             self.portfolio_table.setItem(row_idx, 9, QTableWidgetItem(f"${cat_total_ars:,.2f}"))
@@ -1604,8 +1472,8 @@ class PortfolioAppQt(QMainWindow):
             if total_valor > 0:
                 cat_porcentaje = (cat_total_ars / total_valor) * 100
                 self.portfolio_table.setItem(row_idx, 11, QTableWidgetItem(f"{cat_porcentaje:.2f}%"))
-            
-            # Estilo fila categoría
+
+            # Estilo fila categorÃ­a
             for col in range(13):
                 item = self.portfolio_table.item(row_idx, col)
                 if item is None:
@@ -1618,9 +1486,9 @@ class PortfolioAppQt(QMainWindow):
                 font = item.font()
                 font.setBold(True)
                 item.setFont(font)
-            
+
             row_idx += 1
-            
+
             # Filas de activos
             for item in items:
                 self.portfolio_table.insertRow(row_idx)
@@ -1640,7 +1508,7 @@ class PortfolioAppQt(QMainWindow):
                 variacion_str = f"{item['variacion_diaria']:.2f}%" if item['variacion_diaria'] is not None else "N/D"
                 diferencia_valor_str = f"${item['diferencia_valor']:,.2f}"
                 resultado_str = f"${item['resultado']:,.2f}"
-                
+
                 # Calcular % del portafolio usando el total_valor (suma de todos los valores actuales)
                 if total_valor > 0:
                     porcentaje_activo = (valor_ars / total_valor) * 100
@@ -1702,9 +1570,9 @@ class PortfolioAppQt(QMainWindow):
             font = item.font()
             font.setBold(True)
             item.setFont(font)
-        
-        # Actualizar gráficos si es necesario
-        if self.portfolio_tabs.currentIndex() == 1:  # Si está en la pestaña de gráficos
+
+        # Actualizar grÃ¡ficos si es necesario
+        if self.portfolio_tabs.currentIndex() == 1:  # Si estÃ¡ en la pestaÃ±a de grÃ¡ficos
             self.draw_category_pie_chart()
 
     def draw_category_pie_chart(self):
@@ -1713,40 +1581,40 @@ class PortfolioAppQt(QMainWindow):
             widget = self.category_chart_layout.itemAt(i).widget()
             if widget:
                 widget.setParent(None)
-        
+
         if not hasattr(self, 'portfolio_data') or not hasattr(self, 'categorias'):
             return
-        
-        # Agrupar por categoría y sumar el valor actual
+
+        # Agrupar por categorÃ­a y sumar el valor actual
         categorias_dict = {}
         for item in self.portfolio_data:
             cat = item['tipo']
             if cat not in categorias_dict:
                 categorias_dict[cat] = 0.0
             categorias_dict[cat] += item['valor_actual']
-        
-        # Solo consideramos categorías con valor positivo
+
+        # Solo consideramos categorÃ­as con valor positivo
         cats = []
         valores = []
         for cat, val in categorias_dict.items():
             if val > 0:
                 cats.append(cat)
                 valores.append(val)
-        
+
         # Si no hay valores positivos, no dibujamos
         if not valores:
-            no_data_label = QLabel("No hay datos suficientes para mostrar el gráfico")
+            no_data_label = QLabel("No hay datos suficientes para mostrar el grÃ¡fico")
             self.category_chart_layout.addWidget(no_data_label)
             return
-        
+
         # Crear figura de matplotlib
         fig = Figure(figsize=(6, 6), dpi=100)
         ax = fig.add_subplot(111)
-        
-        # Colores para las categorías
+
+        # Colores para las categorÃ­as
         colors = plt.get_cmap('Accent')(np.linspace(0, 1, len(cats)))
-        
-        # Dibujar el gráfico de torta
+
+        # Dibujar el grÃ¡fico de torta
         wedges, texts, autotexts = ax.pie(
             valores, 
             labels=cats, 
@@ -1755,14 +1623,14 @@ class PortfolioAppQt(QMainWindow):
             colors=colors[:len(cats)],
             textprops={'fontsize': 9}
         )
-        
-        ax.set_title('Distribución del Portafolio por Categoría', fontsize=12, pad=25)
+
+        ax.set_title('DistribuciÃ³n del Portafolio por CategorÃ­a', fontsize=12, pad=25)
         ax.axis('equal')  # Para que sea circular
-        
+
         # Canvas para mostrar la figura
         canvas = FigureCanvasQTAgg(fig)
         self.category_chart_layout.addWidget(canvas)
-        
+
         # Guardar referencia para eventos
         self.pie_chart_elements = {
             'wedges': wedges,
@@ -1771,14 +1639,14 @@ class PortfolioAppQt(QMainWindow):
             'categories': cats,
             'canvas': canvas
         }
-        
+
         # Habilitar eventos de clic
         for wedge in wedges:
-            wedge.set_picker(True)  # Permitir selección
-        
+            wedge.set_picker(True)  # Permitir selecciÃ³n
+
         # Conectar evento de clic
         canvas.mpl_connect('pick_event', self.on_pie_click)
-        
+
         # Guardar referencia para eventos
         self.pie_chart = {
             'canvas': canvas,
@@ -1801,10 +1669,10 @@ class PortfolioAppQt(QMainWindow):
                 return
         else:
             idx = self.pie_chart_elements['wedges'].index(event.artist)
-        
+
         category = self.pie_chart_elements['categories'][idx]
         self.draw_symbols_pie_chart(category)
-    
+
     def draw_symbols_pie_chart(self, category):
         # Limpiar widget anterior
         for i in reversed(range(self.symbol_chart_layout.count())):
@@ -1812,28 +1680,28 @@ class PortfolioAppQt(QMainWindow):
             if widget:
                 widget.deleteLater()
 
-        # Filtrar los símbolos de esta categoría con valor actual positivo
+        # Filtrar los sÃ­mbolos de esta categorÃ­a con valor actual positivo
         symbols = []
         values = []
         for item in self.portfolio_data:
             if item['tipo'] == category and item['valor_actual'] > 0:
                 symbols.append(item['simbolo_display'])
                 values.append(item['valor_actual'])
-        
-        # Si no hay símbolos, mostrar mensaje
+
+        # Si no hay sÃ­mbolos, mostrar mensaje
         if not values:
             label = QLabel(f"No hay activos en {category}")
             self.symbol_chart_layout.addWidget(label)
             return
-        
+
         # Crear figura de matplotlib
         fig = Figure(figsize=(6, 6), dpi=100)
         ax = fig.add_subplot(111)
-        
-        # Colores para los símbolos
+
+        # Colores para los sÃ­mbolos
         colors = plt.get_cmap('Accent')(np.linspace(0, 1, len(symbols)))
-        
-        # Dibujar el gráfico de torta
+
+        # Dibujar el grÃ¡fico de torta
         wedges, texts, autotexts = ax.pie(
             values, 
             labels=symbols, 
@@ -1842,14 +1710,14 @@ class PortfolioAppQt(QMainWindow):
             colors=colors[:len(symbols)],
             textprops={'fontsize': 9}
         )
-        
-        ax.set_title(f'Distribución de {category}', fontsize=12, pad=25)
+
+        ax.set_title(f'DistribuciÃ³n de {category}', fontsize=12, pad=25)
         ax.axis('equal')  # Para que sea circular
-        
+
         # Canvas para mostrar la figura
         canvas = FigureCanvasQTAgg(fig)
         self.symbol_chart_layout.addWidget(canvas)
-    
+
     def create_journal_view(self, parent_widget):
         layout = QVBoxLayout(parent_widget)
 
@@ -1857,8 +1725,8 @@ class PortfolioAppQt(QMainWindow):
         self.journal_table = QTableWidget()
         self.journal_table.setColumnCount(19)
         self.journal_table.setHorizontalHeaderLabels([
-            "Fecha", "Tipo", "Operación", "Símbolo", "Detalle",
-            "Broker", "Cantidad", "Precio", "Rendimiento", "Total", "Comisión",
+            "Fecha", "Tipo", "OperaciÃ³n", "SÃ­mbolo", "Detalle",
+            "Broker", "Cantidad", "Precio", "Rendimiento", "Total", "ComisiÃ³n",
             "IVA", "Derechos", "IVA Der", "Desc Total",
             "Costo", "Ingreso", "Balance", "Moneda", "TC USD/ARS"
         ])
@@ -1866,24 +1734,24 @@ class PortfolioAppQt(QMainWindow):
         self.journal_table.verticalHeader().setVisible(False)
         self.journal_table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
         self.journal_table.setSizeAdjustPolicy(QAbstractScrollArea.SizeAdjustPolicy.AdjustToContents)
-        
+
         layout.addWidget(self.journal_table)
-        
+
         # Botones
         button_frame = QFrame()
         button_layout = QHBoxLayout(button_frame)
-        
+
         self.delete_journal_btn = QPushButton("Eliminar")
         self.delete_journal_btn.clicked.connect(self.eliminar_operacion)
         button_layout.addWidget(self.delete_journal_btn)
-        
+
         self.refresh_journal_btn = QPushButton("Actualizar")
         self.refresh_journal_btn.clicked.connect(self.load_journal)
         button_layout.addWidget(self.refresh_journal_btn)
-        
+
         button_layout.addStretch()
         layout.addWidget(button_frame)
-    
+
     def load_journal(self):
         self.journal_table.setRowCount(0)
 
@@ -1916,16 +1784,16 @@ class PortfolioAppQt(QMainWindow):
                     item = QTableWidgetItem(str(value))
                 item.setFlags(item.flags() & ~Qt.ItemFlag.ItemIsEditable)
                 self.journal_table.setItem(row_idx, col_idx, item)
-    
+
     def eliminar_operacion(self):
         selected_items = self.journal_table.selectedItems()
         if not selected_items:
-            QMessageBox.warning(self, "Advertencia", "Seleccione una operación para eliminar")
+            QMessageBox.warning(self, "Advertencia", "Seleccione una operaciÃ³n para eliminar")
             return
-        
-        if QMessageBox.question(self, "Confirmar", "¿Está seguro de eliminar la operación seleccionada?") == QMessageBox.StandardButton.Yes:
+
+        if QMessageBox.question(self, "Confirmar", "Â¿EstÃ¡ seguro de eliminar la operaciÃ³n seleccionada?") == QMessageBox.StandardButton.Yes:
             selected_row = selected_items[0].row()
-            # Obtener id desde la tabla (no visible). Suponemos que las filas están en orden y fetch_journal devuelve ids crecientes
+            # Obtener id desde la tabla (no visible). Suponemos que las filas estÃ¡n en orden y fetch_journal devuelve ids crecientes
             rows = fetch_journal()
             if selected_row < len(rows):
                 row_id = rows[selected_row].get('id')
@@ -1938,12 +1806,12 @@ class PortfolioAppQt(QMainWindow):
             self.load_journal()
             self.load_portfolio()
             self.load_finished_operations()
-            
-            # Actualizar pestaña de Análisis
+
+            # Actualizar pestaÃ±a de AnÃ¡lisis
             self.analysis_tab.load_portfolio()
             self.analysis_tab.load_saved_data()
             self.analysis_tab.sort_tables()
-    
+
     def load_compras_pendientes(self):
         self.compras_pendientes = {}
         rows = fetch_journal()
@@ -1975,6 +1843,12 @@ if __name__ == "__main__":
     window = PortfolioAppQt()
     window.show()
     sys.exit(app.exec())
+
+
+
+
+
+
 
 
 
