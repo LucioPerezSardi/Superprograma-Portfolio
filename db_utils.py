@@ -4,6 +4,8 @@ import shutil
 from contextlib import contextmanager
 from datetime import datetime
 
+import pandas as pd
+
 DB_PATH = os.path.join("data", "portfolio.db")
 
 SCHEMA = """
@@ -188,6 +190,34 @@ def insert_journal_row(row):
             row,
         )
         conn.commit()
+
+
+def save_market_data(df):
+    """Guarda los datos de mercado combinados en SQLite."""
+    if df is None:
+        return
+    timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    df_to_save = df.copy()
+    df_to_save["updated_at"] = timestamp
+    with get_conn() as conn:
+        # Reemplazar la tabla completa en cada actualización
+        conn.execute("DROP TABLE IF EXISTS market_data")
+        df_to_save.to_sql("market_data", conn, if_exists="replace", index=False)
+        conn.commit()
+
+
+def fetch_market_data():
+    """Devuelve DataFrame con datos de mercado y timestamp de actualización."""
+    with get_conn() as conn:
+        try:
+            df = pd.read_sql("SELECT * FROM market_data", conn)
+        except Exception:
+            return None, None
+    last_update = None
+    if df is not None and not df.empty and "updated_at" in df.columns:
+        last_update = df["updated_at"].iloc[0]
+        df = df.drop(columns=["updated_at"])
+    return df, last_update
 
 
 def delete_journal_row_by_id(row_id):

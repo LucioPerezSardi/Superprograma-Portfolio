@@ -1,5 +1,4 @@
 import os
-import csv
 import threading
 import pandas as pd
 from datetime import datetime, timedelta
@@ -37,17 +36,17 @@ from db_utils import (
     fetch_analysis,
     save_analysis,
     replace_portfolio,
-    backup_csv_files,
+    fetch_market_data,
     import_journal_from_csv,
     import_analysis_from_csv,
     import_portfolio_from_csv,
 )
 
-# Configuración de archivos
+# Configuracion de datos
 DATA_DIR = "data"
-JOURNAL_FILE = os.path.join(DATA_DIR, "journal.csv")
-PORTFOLIO_FILE = os.path.join(DATA_DIR, "portfolio.csv")
-ANALYSIS_FILE = os.path.join(DATA_DIR, "Analisis.csv")
+LEGACY_JOURNAL = os.path.join(DATA_DIR, "journal.csv")
+LEGACY_PORTFOLIO = os.path.join(DATA_DIR, "portfolio.csv")
+LEGACY_ANALYSIS = os.path.join(DATA_DIR, "Analisis.csv")
 
 # Brokers disponibles
 BROKERS = ["IOL", "BMB", "COCOS", "BALANZ", "BINANCE", "KUCOIN", "BYBIT", "BINGX"]
@@ -56,24 +55,34 @@ CURRENCIES = ["ARS", "USD"]
 # Crear directorio si no existe
 os.makedirs(DATA_DIR, exist_ok=True)
 
-# Inicializar base de datos y migrar CSV con backup
+# Inicializar base de datos
 def init_files():
     os.makedirs(DATA_DIR, exist_ok=True)
     init_db()
-    # Backup CSV y migración
-    csv_paths = [JOURNAL_FILE, ANALYSIS_FILE, PORTFOLIO_FILE]
-    backup_csv_files(csv_paths)
-    if os.path.exists(JOURNAL_FILE):
-        import_journal_from_csv(JOURNAL_FILE)
-    if os.path.exists(ANALYSIS_FILE):
-        import_analysis_from_csv(ANALYSIS_FILE)
-    if os.path.exists(PORTFOLIO_FILE):
-        import_portfolio_from_csv(PORTFOLIO_FILE)
-    
-    # Crear archivo de análisis si no existe
-    if not os.path.exists(ANALYSIS_FILE):
-        with open(ANALYSIS_FILE, 'w', encoding='utf-8') as f:
-            f.write("Tipo,Simbolo,Descripcion,Revision,UltimaRevision,Comentario\n")
+    journal_empty = analysis_empty = portfolio_empty = False
+    try:
+        with get_conn() as conn:
+            journal_empty = conn.execute("SELECT COUNT(*) FROM journal").fetchone()[0] == 0
+            analysis_empty = conn.execute("SELECT COUNT(*) FROM analysis").fetchone()[0] == 0
+            portfolio_empty = conn.execute("SELECT COUNT(*) FROM portfolio").fetchone()[0] == 0
+    except Exception as e:
+        print(f"Error verificando datos iniciales: {e}")
+
+    if journal_empty and os.path.exists(LEGACY_JOURNAL):
+        try:
+            import_journal_from_csv(LEGACY_JOURNAL)
+        except Exception as e:
+            print(f"Error migrando journal.csv: {e}")
+    if analysis_empty and os.path.exists(LEGACY_ANALYSIS):
+        try:
+            import_analysis_from_csv(LEGACY_ANALYSIS)
+        except Exception as e:
+            print(f"Error migrando Analisis.csv: {e}")
+    if portfolio_empty and os.path.exists(LEGACY_PORTFOLIO):
+        try:
+            import_portfolio_from_csv(LEGACY_PORTFOLIO)
+        except Exception as e:
+            print(f"Error migrando portfolio.csv: {e}")
 
 # Clase para colorear los ítems del ComboBox (Análisis)
 class ColorDelegate(QStyledItemDelegate):
@@ -299,16 +308,15 @@ class AnalysisTab(QWidget):
                     revision = revision_combo.currentText() if revision_combo is not None else ""
                     
                     data.append({
-                        'Tipo': tipo.upper(),
-                        'Simbolo': symbol,
-                        'Descripcion': desc,
-                        'Revision': revision,
-                        'UltimaRevision': ultima_revision,
-                        'Comentario': comentario
+                        'tipo': tipo.upper(),
+                        'simbolo': symbol,
+                        'descripcion': desc,
+                        'revision': revision,
+                        'ultima_revision': ultima_revision,
+                        'comentario': comentario
                     })
             
-            df = pd.DataFrame(data)
-            df.to_csv(ANALYSIS_FILE, index=False, encoding='utf-8')
+            save_analysis(data)
             
         except Exception as e:
             print(f"Error guardando datos: {e}")
@@ -960,13 +968,23 @@ class PortfolioAppQt(QMainWindow):
                 QMessageBox.critical(self, "Error", "Formato de fecha inválido. Use YYYY-MM-DD")
                 return
         
-        # Leer el libro diario completo
+        # Leer el libro diario completo desde la base
         journal_data = []
-        if os.path.exists(JOURNAL_FILE):
-            with open(JOURNAL_FILE, 'r', encoding='utf-8') as f:
-                reader = csv.DictReader(f)
-                for row in reader:
-                    journal_data.append(row)
+        try:
+            for row in fetch_journal():
+                journal_data.append({
+                    'Fecha': row.get('fecha'),
+                    'Tipo': row.get('tipo'),
+                    'Tipo_Operacion': row.get('tipo_operacion'),
+                    'Simbolo': row.get('simbolo'),
+                    'Detalle': row.get('detalle'),
+                    'Cantidad': str(row.get('cantidad', "")),
+                    'Precio': str(row.get('precio', "")),
+                    'Rendimiento': str(row.get('rendimiento', "")),
+                    'Total_Descuentos': str(row.get('total_descuentos', "")),
+                })
+        except Exception as e:
+            print(f"Error leyendo journal: {e}")
         
         # Ordenar por fecha
         journal_data.sort(key=lambda x: datetime.strptime(x['Fecha'], '%Y-%m-%d'))
@@ -1294,19 +1312,15 @@ class PortfolioAppQt(QMainWindow):
         replace_portfolio(rows_to_save)
     
     def cargar_datos_mercado(self):
-        ruta_mercado = os.path.join(DATA_DIR, "Combined_Market_Data.csv")
-        if os.path.exists(ruta_mercado):
-            try:
-                self.df_mercado = pd.read_csv(ruta_mercado, encoding='utf-8-sig')
-                timestamp = os.path.getmtime(ruta_mercado)
-                self.last_update = datetime.fromtimestamp(timestamp).strftime("%Y-%m-%d %H:%M:%S")
-                
-                # Actualizar el label si ya está creado
-                if hasattr(self, 'status_label'):
-                    self.status_label.setText(f"Última actualización: {self.last_update}")
-            except Exception as e:
-                QMessageBox.critical(self, "Error", f"Error cargando datos de mercado: {str(e)}")
-                self.df_mercado = None
+        try:
+            self.df_mercado, self.last_update = fetch_market_data()
+            if self.df_mercado is not None and hasattr(self, 'status_label') and self.last_update:
+                self.status_label.setText(f"Ultima actualizacion: {self.last_update}")
+            if self.df_mercado is None:
+                self.last_update = None
+        except Exception as e:
+            QMessageBox.critical(self, "Error", f"Error cargando datos de mercado: {str(e)}")
+            self.df_mercado = None
 
     def actualizar_datos_mercado(self):
         if hasattr(self, 'update_thread') and self.update_thread.isRunning():
@@ -1335,18 +1349,19 @@ class PortfolioAppQt(QMainWindow):
     
     def get_next_plazo_fijo_number(self):
         counter = 1
-        if os.path.exists(JOURNAL_FILE):
-            with open(JOURNAL_FILE, 'r', encoding='utf-8') as f:
-                reader = csv.reader(f)
-                next(reader)
-                for row in reader:
-                    if row and row[1] == "Plazo Fijo" and row[3].startswith("Plazo Fijo "):
+        try:
+            for row in fetch_journal():
+                if row.get("tipo") == "Plazo Fijo":
+                    detalle = str(row.get("detalle", ""))
+                    if detalle.startswith("Plazo Fijo "):
                         try:
-                            num = int(row[3].split(" ")[2])
+                            num = int(detalle.split(" ")[2])
                             if num >= counter:
                                 counter = num + 1
-                        except:
-                            pass
+                        except Exception:
+                            continue
+        except Exception as e:
+            print(f"Error calculando prσximo plazo fijo: {e}")
         return counter
     
     def create_operation_form(self, parent_widget):
@@ -1509,6 +1524,55 @@ class PortfolioAppQt(QMainWindow):
         self.update_simbolo_combobox()
         self.calcular_on_change()
 
+    def on_broker_change(self, _):
+        """Actualizar símbolos disponibles y recálculos cuando cambia el broker."""
+        self.update_simbolo_combobox()
+        self.calcular_on_change()
+
+    def update_simbolo_combobox(self):
+        """Rellena el combo de símbolos según broker y tipo actual."""
+        current = self.simbolo_combo.currentText()
+        tipo = self.tipo_combo.currentText()
+        broker = self.broker_combo.currentText()
+        symbols = []
+        try:
+            query = "SELECT DISTINCT simbolo FROM portfolio WHERE broker = ?"
+            params = [broker]
+            if tipo == "Plazo Fijo":
+                query += " AND tipo = ?"
+                params.append("Plazo Fijo")
+            with get_conn() as conn:
+                cur = conn.execute(query, params)
+                symbols = [row["simbolo"] for row in cur.fetchall() if row["simbolo"]]
+        except Exception as e:
+            print(f"Error actualizando símbolos: {e}")
+
+        # Mantener el texto actual si no está en la lista
+        if current and current not in symbols:
+            symbols.insert(0, current)
+
+        self.simbolo_combo.blockSignals(True)
+        self.simbolo_combo.clear()
+        self.simbolo_combo.addItems(sorted(set(symbols)))
+        if current:
+            self.simbolo_combo.setCurrentText(current)
+        self.simbolo_combo.blockSignals(False)
+
+    def get_moneda_actual(self, tipo):
+        """Determina moneda base según tipo de operación."""
+        if "USD" in tipo:
+            return "USD"
+        if tipo in ["Criptomonedas"]:
+            return "USD"
+        return "ARS"
+
+    def calcular_on_change(self):
+        """Recalcula importes cuando cambian campos numéricos."""
+        try:
+            self.calcular()
+        except Exception:
+            pass
+
     def on_tipo_op_change(self, tipo_op):
         tipo = self.tipo_combo.currentText()
         
@@ -1527,89 +1591,18 @@ class PortfolioAppQt(QMainWindow):
             self.tc_edit.setEnabled(False)
             self.tc_edit.setText("1.0")
             # Cargar cantidad del plazo fijo
-            if self.simbolo_combo.currentText() and os.path.exists(PORTFOLIO_FILE):
-                with open(PORTFOLIO_FILE, 'r', encoding='utf-8') as f:
-                    reader = csv.DictReader(f)
-                    for row in reader:
-                        if row['Simbolo'] == self.simbolo_combo.currentText():
-                            self.cantidad_edit.setText(row['Cantidad'])
-                            break
-        elif tipo in ["Acciones AR", "CEDEARs", "Bonos AR", "ETFs" , "Criptomonedas", "FCIs AR"]:
-            if tipo_op == "Rendimiento":
-                self.cantidad_edit.setText("0")
-                self.precio_edit.setText("0")
-                self.cantidad_edit.setEnabled(False)
-                self.precio_edit.setEnabled(False)
-                self.rendimiento_edit.setEnabled(True)
-                if self.get_moneda_actual(tipo) == "USD":
-                    self.tc_edit.setEnabled(True)
-                    self.tc_edit.setText(str(getattr(self, "default_fx_rate", 1.0)))
-                else:
-                    self.tc_edit.setEnabled(False)
-                    self.tc_edit.setText("1.0")
-            elif tipo_op in ["Compra", "Venta"]:
-                self.rendimiento_edit.setText("0")
-                self.rendimiento_edit.setEnabled(False)
-                self.cantidad_edit.setEnabled(True)
-                self.precio_edit.setEnabled(True)
-                if self.get_moneda_actual(tipo) == "USD":
-                    self.tc_edit.setEnabled(True)
-                    self.tc_edit.setText(str(getattr(self, "default_fx_rate", 1.0)))
-                else:
-                    self.tc_edit.setEnabled(False)
-                    self.tc_edit.setText("1.0")
-        
-        self.calcular_on_change()
-
-    def on_broker_change(self, broker):
-        # Actualizar símbolos disponibles en función del broker seleccionado
-        self.update_simbolo_combobox()
-
-    def get_moneda_actual(self, tipo):
-        if tipo in ["Depósito USD", "Criptomonedas"]:
-            return "USD"
-        return "ARS"
-    
-    def update_simbolo_combobox(self):
-        tipo = self.tipo_combo.currentText()
-        tipo_op = self.tipo_op_combo.currentText()
-        broker = self.broker_combo.currentText()
-        simbolos = []
-        self.simbolo_combo.currentTextChanged.connect(self.on_simbolo_selected)
-
-        # Solo mostrar símbolos disponibles para venta
-        if tipo_op == "Venta":
-            holdings = self.get_holdings_by_broker()
-            broker_holdings = holdings.get(broker, {})
-            for sym, qty in broker_holdings.items():
-                if qty > 0:
-                    simbolos.append(sym)
-
-        self.simbolo_combo.clear()
-        self.simbolo_combo.addItems(simbolos)
-        
-        # Seleccionar el primer símbolo si hay uno disponible
-        if simbolos:
-            self.simbolo_combo.setCurrentIndex(0)
-            self.on_simbolo_selected()  # Actualizar detalles   
-    
-    def on_simbolo_selected(self):
-        if self.tipo_op_combo.currentText() == "Venta":
-            simbolo = self.simbolo_combo.currentText()
-            broker = self.broker_combo.currentText()
-            if simbolo:
-                # Cargar cantidad disponible automáticamente por broker
-                holdings = self.get_holdings_by_broker()
-                qty = holdings.get(broker, {}).get(simbolo, 0)
-                self.cantidad_edit.setText(str(qty))
-
-    def calcular_on_change(self):
-        try:
-            if (self.cantidad_edit.text() and self.precio_edit.text() and 
-                self.tipo_combo.currentText() and self.tipo_op_combo.currentText()):
-                self.calcular()
-        except:
-            pass
+            if self.simbolo_combo.currentText():
+                try:
+                    with get_conn() as conn:
+                        cur = conn.execute(
+                            "SELECT cantidad FROM portfolio WHERE simbolo = ? LIMIT 1",
+                            (self.simbolo_combo.currentText(),)
+                        )
+                        row = cur.fetchone()
+                        if row:
+                            self.cantidad_edit.setText(str(row["cantidad"]))
+                except Exception as e:
+                    print(f"Error cargando cantidad de plazo fijo: {e}")
     
     def calcular_descuentos(self):
         try:
@@ -2064,55 +2057,49 @@ class PortfolioAppQt(QMainWindow):
 
     def get_cash_by_broker(self, moneda="ARS"):
         balances = {broker: 0.0 for broker in BROKERS}
-        if os.path.exists(JOURNAL_FILE):
-            try:
-                with open(JOURNAL_FILE, 'r', encoding='utf-8') as f:
-                    reader = csv.DictReader(f)
-                    for row in reader:
-                        try:
-                            costo_total = float(str(row.get('Costo_Total', '0')).replace(',', '.'))
-                        except:
-                            costo_total = 0.0
-                        try:
-                            ingreso_total = float(str(row.get('Ingreso_Total', '0')).replace(',', '.'))
-                        except:
-                            ingreso_total = 0.0
-                        broker = row.get('Broker', BROKERS[0]) or BROKERS[0]
-                        row_moneda = row.get('Moneda', 'ARS') or 'ARS'
-                        if row_moneda != moneda:
-                            continue
-                        delta = ingreso_total - costo_total
-                        balances[broker] = balances.get(broker, 0.0) + delta
-            except Exception as e:
-                print(f"Error calculando efectivo por broker: {e}")
+        try:
+            for row in fetch_journal():
+                try:
+                    costo_total = float(str(row.get('costo_total', '0')).replace(',', '.'))
+                except Exception:
+                    costo_total = 0.0
+                try:
+                    ingreso_total = float(str(row.get('ingreso_total', '0')).replace(',', '.'))
+                except Exception:
+                    ingreso_total = 0.0
+                broker = row.get('broker', BROKERS[0]) or BROKERS[0]
+                row_moneda = row.get('moneda', 'ARS') or 'ARS'
+                if row_moneda != moneda:
+                    continue
+                delta = ingreso_total - costo_total
+                balances[broker] = balances.get(broker, 0.0) + delta
+        except Exception as e:
+            print(f"Error calculando efectivo por broker: {e}")
         return balances
 
     def get_holdings_by_broker(self):
         holdings = {broker: {} for broker in BROKERS}
-        if os.path.exists(JOURNAL_FILE):
-            try:
-                with open(JOURNAL_FILE, 'r', encoding='utf-8') as f:
-                    reader = csv.DictReader(f)
-                    for row in reader:
-                        tipo = row.get('Tipo', '')
-                        tipo_op = row.get('Tipo_Operacion', '')
-                        simbolo = row.get('Simbolo', '')
-                        broker = row.get('Broker', BROKERS[0]) or BROKERS[0]
-                        if not simbolo or tipo in ["Depósito ARS", "Depósito USD"]:
-                            continue
-                        try:
-                            cantidad = float(str(row.get('Cantidad', '0')).replace(',', '.'))
-                        except:
-                            cantidad = 0.0
+        try:
+            for row in fetch_journal():
+                tipo = row.get('tipo', '')
+                tipo_op = row.get('tipo_operacion', '')
+                simbolo = row.get('simbolo', '')
+                broker = row.get('broker', BROKERS[0]) or BROKERS[0]
+                if not simbolo or tipo in ["Dep?sito ARS", "Dep?sito USD"]:
+                    continue
+                try:
+                    cantidad = float(str(row.get('cantidad', '0')).replace(',', '.'))
+                except Exception:
+                    cantidad = 0.0
 
-                        if tipo_op == "Compra":
-                            holdings[broker][simbolo] = holdings[broker].get(simbolo, 0.0) + cantidad
-                        elif tipo_op == "Venta":
-                            holdings[broker][simbolo] = holdings[broker].get(simbolo, 0.0) - cantidad
-                            if holdings[broker][simbolo] < 0:
-                                holdings[broker][simbolo] = 0.0
-            except Exception as e:
-                print(f"Error calculando posiciones por broker: {e}")
+                if tipo_op == "Compra":
+                    holdings[broker][simbolo] = holdings[broker].get(simbolo, 0.0) + cantidad
+                elif tipo_op == "Venta":
+                    holdings[broker][simbolo] = holdings[broker].get(simbolo, 0.0) - cantidad
+                    if holdings[broker][simbolo] < 0:
+                        holdings[broker][simbolo] = 0.0
+        except Exception as e:
+            print(f"Error calculando posiciones por broker: {e}")
         return holdings
 
     def load_portfolio(self):
@@ -2122,47 +2109,38 @@ class PortfolioAppQt(QMainWindow):
         plazo_fijo_detalles = {}
         descuentos_por_simbolo = {}
         rendimientos_por_simbolo = {}
-        if os.path.exists(JOURNAL_FILE):
-            with open(JOURNAL_FILE, 'r', encoding='utf-8') as f:
-                reader = csv.reader(f)
-                headers = next(reader)
-                try:
-                    simbolo_index = headers.index("Simbolo")
-                    tipo_op_index = headers.index("Tipo_Operacion")
-                    total_desc_index = headers.index("Total_Descuentos")
-                    rendimiento_index = headers.index("Rendimiento")
-                except ValueError:
-                    pass
-                else:
-                    for row in reader:
-                        if len(row) > max(simbolo_index, tipo_op_index, total_desc_index, rendimiento_index):
-                            simbolo = row[simbolo_index]
-                            tipo_op = row[tipo_op_index]
-                            total_desc_str = row[total_desc_index]
-                            rendimiento_str = row[rendimiento_index]
-                            
-                            # Recolectar descuentos
-                            if tipo_op in ["Compra", "Rendimiento"]:
-                                try:
-                                    total_desc = float(total_desc_str.replace(',', '.'))
-                                except:
-                                    total_desc = 0
-                                if simbolo not in descuentos_por_simbolo:
-                                    descuentos_por_simbolo[simbolo] = 0
-                                descuentos_por_simbolo[simbolo] += total_desc
-                            
-                            # Recolectar rendimientos
-                            if tipo_op == "Rendimiento":
-                                try:
-                                    rendimiento = float(rendimiento_str.replace(',', '.'))
-                                except:
-                                    rendimiento = 0
-                                if simbolo not in rendimientos_por_simbolo:
-                                    rendimientos_por_simbolo[simbolo] = 0
-                                rendimientos_por_simbolo[simbolo] += rendimiento
-                            
-                            if len(row) >= 5 and row[1] == "Plazo Fijo" and row[3]:
-                                plazo_fijo_detalles[row[3]] = row[4]
+        try:
+            for row in fetch_journal():
+                simbolo = row.get("simbolo", "")
+                tipo_op = row.get("tipo_operacion", "")
+                tipo = row.get("tipo", "")
+                total_desc = row.get("total_descuentos", 0)
+                rendimiento_val = row.get("rendimiento", 0)
+
+                # Recolectar descuentos
+                if tipo_op in ["Compra", "Rendimiento"]:
+                    try:
+                        total_desc = float(str(total_desc).replace(',', '.'))
+                    except Exception:
+                        total_desc = 0
+                    if simbolo not in descuentos_por_simbolo:
+                        descuentos_por_simbolo[simbolo] = 0
+                    descuentos_por_simbolo[simbolo] += total_desc
+
+                # Recolectar rendimientos
+                if tipo_op == "Rendimiento":
+                    try:
+                        rendimiento = float(str(rendimiento_val).replace(',', '.'))
+                    except Exception:
+                        rendimiento = 0
+                    if simbolo not in rendimientos_por_simbolo:
+                        rendimientos_por_simbolo[simbolo] = 0
+                    rendimientos_por_simbolo[simbolo] += rendimiento
+
+                if tipo == "Plazo Fijo" and simbolo:
+                    plazo_fijo_detalles[simbolo] = row.get("detalle", "")
+        except Exception as e:
+            print(f"Error leyendo journal para portfolio: {e}")
         
         # Calcular efectivo por moneda/broker
         cash_by_broker_ars = self.get_cash_by_broker("ARS")
@@ -2803,3 +2781,12 @@ if __name__ == "__main__":
     window = PortfolioAppQt()
     window.show()
     sys.exit(app.exec())
+
+
+
+
+
+
+
+
+

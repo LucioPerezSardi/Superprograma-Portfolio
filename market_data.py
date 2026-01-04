@@ -15,6 +15,8 @@ from bs4 import BeautifulSoup
 from io import StringIO
 import ssl
 
+from db_utils import save_market_data
+
 # Suprimir logs de Selenium
 LOGGER.setLevel(logging.WARNING)
 logging.getLogger('selenium').setLevel(logging.WARNING)
@@ -232,8 +234,7 @@ def descargar_datos_mercado(carpeta_destino):
                     combined_df = combined_df.drop(columns=[col])
             
             # Guardar resultados
-            ruta_csv = os.path.join(carpeta_destino, "Combined_Market_Data.csv")
-            combined_df.to_csv(ruta_csv, index=False, encoding='utf-8-sig')
+            save_market_data(combined_df)
             return combined_df
         return None
 
