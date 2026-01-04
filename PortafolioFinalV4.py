@@ -19,9 +19,9 @@ from PyQt6.QtWidgets import (
     QLabel, QLineEdit, QPushButton, QComboBox, QScrollArea, QFrame, QTableWidget,
     QTableWidgetItem, QHeaderView, QAbstractItemView, QMessageBox, QRadioButton,
     QButtonGroup, QGroupBox, QAbstractScrollArea, QSizePolicy, QSplitter,
-    QStyleFactory, QCheckBox
+    QStyleFactory, QCheckBox, QDateEdit
 )
-from PyQt6.QtCore import Qt, QSize, QUrl, QTimer
+from PyQt6.QtCore import Qt, QSize, QUrl, QTimer, QDate
 from PyQt6.QtGui import QColor, QFont, QBrush
 from PyQt6.QtWebEngineWidgets import QWebEngineView
 from PyQt6.QtWebEngineCore import QWebEngineSettings
@@ -484,7 +484,9 @@ class PortfolioAppQt(QMainWindow):
         layout.setColumnStretch(3, 1)
 
         # Variables para almacenar valores
-        self.fecha_edit = QLineEdit(datetime.now().strftime("%Y-%m-%d"))
+        self.fecha_edit = QDateEdit(QDate.currentDate())
+        self.fecha_edit.setCalendarPopup(True)
+        self.fecha_edit.setDisplayFormat("yyyy-MM-dd")
         self.tipo_combo = QComboBox()
         self.tipo_combo.addItems(["Depósito ARS", "Depósito USD", "Plazo Fijo", "Acciones AR", "CEDEARs", "Bonos AR", "ETFs", "Criptomonedas", "FCIs AR", "Cauciones"])
         self.tipo_op_combo = QComboBox()
@@ -825,7 +827,7 @@ class PortfolioAppQt(QMainWindow):
                 QMessageBox.critical(self, "Error", "Cantidad y Precio deben ser valores positivos")
                 return
 
-            fecha = self.fecha_edit.text()
+            fecha = self.fecha_edit.date().toString("yyyy-MM-dd")
             simbolo = self.simbolo_combo.currentText()
             detalle = self.detalle_edit.text()
             broker = self.broker_combo.currentText() or "GENERAL"
