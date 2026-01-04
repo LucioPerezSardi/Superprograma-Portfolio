@@ -777,11 +777,12 @@ class PortfolioAppQt(QMainWindow):
         try:
             tipo = self.tipo_combo.currentText()
             tipo_op = self.tipo_op_combo.currentText()
+            broker = self.broker_combo.currentText() or "GENERAL"
             cantidad = float(self.cantidad_edit.text().replace(',', '.')) if self.cantidad_edit.text() else 0
             precio = float(self.precio_edit.text().replace(',', '.')) if self.precio_edit.text() else 0
             rendimiento = float(self.rendimiento_edit.text().replace(',', '.')) if self.rendimiento_edit.text() else 0
 
-            op = calcular_operacion(tipo, tipo_op, cantidad, precio, rendimiento)
+            op = calcular_operacion(tipo, tipo_op, cantidad, precio, rendimiento, broker)
 
             def format_number(num):
                 return f"{num:,.2f}".replace(',', 'X').replace('.', ',').replace('X', '.')

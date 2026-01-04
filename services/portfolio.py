@@ -301,22 +301,62 @@ def calcular_descuentos_y_totales(comision: float, derechos: float) -> dict:
     }
 
 
-def calcular_operacion(tipo: str, tipo_op: str, cantidad: float, precio: float, rendimiento: float) -> dict:
+def _rates_por_broker(broker: str, tipo: str, tipo_op: str) -> tuple[float, float]:
+    """
+    Retorna (comisión%, derechos%) según broker/instrumento.
+    Tasas expresadas en proporción (0.005 == 0.5%).
+    """
+    broker = (broker or "").upper()
+    tipo = (tipo or "").upper()
+    tipo_op = (tipo_op or "").upper()
+
+    # Default histórico
+    default_comm = 0.0
+    default_derechos = 0.0
+    if tipo_op == "RENDIMIENTO":
+        default_comm = 0.01
+    elif tipo in ["ACCIONES AR", "CEDEARS", "ETFS"]:
+        default_comm = 0.006
+        default_derechos = 0.0008
+    elif tipo == "BONOS AR":
+        default_comm = 0.005
+        default_derechos = 0.0001
+
+    # IOL (aprox. tope perfil bajo)
+    if broker == "IOL":
+        iol_rates = {
+            "ACCIONES AR": (0.005, 0.0005),
+            "CEDEARS": (0.005, 0.0005),
+            "ETFS": (0.005, 0.0005),
+            "BONOS AR": (0.005, 0.0001),
+            "OPCIONES": (0.005, 0.0006),
+            "CAUCIONES": (0.002, 0.0),
+        }
+        if tipo_op == "RENDIMIENTO":
+            return 0.01, 0.0  # usamos mismo criterio por falta de dato específico
+        if tipo in iol_rates:
+            return iol_rates[tipo]
+        return default_comm, default_derechos
+
+    return default_comm, default_derechos
+
+
+def calcular_operacion(
+    tipo: str,
+    tipo_op: str,
+    cantidad: float,
+    precio: float,
+    rendimiento: float,
+    broker: str = "",
+) -> dict:
     total_sin_desc = cantidad * precio + rendimiento
-    comision = 0.0
-    derechos = 0.0
-    if tipo_op == "Rendimiento":
-        comision = 0.01 * total_sin_desc
-    elif tipo in ["Acciones AR", "CEDEARs", "ETFs"]:
-        comision = 0.006 * total_sin_desc
-        derechos = 0.0008 * total_sin_desc
-    elif tipo == "Bonos AR":
-        comision = 0.005 * total_sin_desc
-        derechos = 0.0001 * total_sin_desc
+    comm_rate, der_rate = _rates_por_broker(broker, tipo, tipo_op)
+    comision = comm_rate * total_sin_desc
+    derechos = der_rate * total_sin_desc
 
     descuentos = calcular_descuentos_y_totales(comision, derechos)
 
-    if tipo in ["Depósito ARS", "Depósito USD", "DepІsito ARS", "DepІsito USD"]:
+    if tipo in ["Depósito ARS", "Depósito USD", "DEPÓSITO ARS", "DEPÓSITO USD"]:
         if tipo_op == "Entrada":
             costo_total = 0
             ingreso_total = total_sin_desc
