@@ -1,4 +1,4 @@
-# -*- coding: utf-8 -*-
+﻿# -*- coding: utf-8 -*-
 import os
 import threading
 import pandas as pd
@@ -1846,6 +1846,11 @@ if __name__ == "__main__":
     window = PortfolioAppQt()
     window.show()
     sys.exit(app.exec())
+
+
+
+
+
 
 
 
