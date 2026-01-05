@@ -1,4 +1,4 @@
-# -*- coding: utf-8 -*-
+﻿# -*- coding: utf-8 -*-
 import os
 import threading
 import pandas as pd
@@ -438,7 +438,7 @@ class PortfolioAppQt(QMainWindow):
         try:
             self.df_mercado, self.last_update = load_market_data()
             if self.df_mercado is not None and hasattr(self, 'status_label') and self.last_update:
-                self.status_label.setText(f"Ultima actualizacion: {self.last_update}")
+                self.status_label.setText(f"Última actualización: {self.last_update}")
             if self.df_mercado is None:
                 self.last_update = None
         except Exception as e:
@@ -976,7 +976,7 @@ class PortfolioAppQt(QMainWindow):
             "Variación\nDiaria",
             "Precio Operación\nde Compra",
             "Valor Operación\nde Compra",
-            "Precio\n??ltimo Operado",
+            "Precio\nÚltimo Operado",
             "Valor\nActual (moneda)",
             "Valor ARS",
             "Valor USD",
@@ -1045,13 +1045,13 @@ class PortfolioAppQt(QMainWindow):
 
         control_layout.addWidget(auto_frame)
 
-        # 4) Grupo vertical para ?????ltima actualización???
+        # 4) Grupo vertical para Última actualización
         status_group = QVBoxLayout()
         status_group.setSpacing(0)
         status_group.setContentsMargins(0, 0, 0, 0)
 
         self.status_label = QLabel(
-            f"??ltima actualización: {self.last_update if self.last_update else '-'}"
+            f"Última actualización {self.last_update if self.last_update else '-'}"
         )
         status_group.addWidget(self.status_label, alignment=Qt.AlignmentFlag.AlignLeft)
 
@@ -1846,6 +1846,11 @@ if __name__ == "__main__":
     window = PortfolioAppQt()
     window.show()
     sys.exit(app.exec())
+
+
+
+
+
 
 
 
