@@ -438,7 +438,7 @@ class PortfolioAppQt(QMainWindow):
         try:
             self.df_mercado, self.last_update = load_market_data()
             if self.df_mercado is not None and hasattr(self, 'status_label') and self.last_update:
-                self.status_label.setText(f"Ultima actualizacion: {self.last_update}")
+                self.status_label.setText(f"Última actualización: {self.last_update}")
             if self.df_mercado is None:
                 self.last_update = None
         except Exception as e:
@@ -918,7 +918,7 @@ class PortfolioAppQt(QMainWindow):
             # Recalcular el portafolio
             self.recalcular_portfolio()
 
-            QMessageBox.information(self, "??xito", "Operación registrada correctamente")
+            QMessageBox.information(self, "Éxito", "Operación registrada correctamente")
             self.limpiar_formulario()
             self.load_journal()
             self.load_portfolio()
@@ -970,13 +970,13 @@ class PortfolioAppQt(QMainWindow):
         self.portfolio_table.setColumnCount(13)
         self.portfolio_table.setHorizontalHeaderLabels([
             "Categoría",
-            "Símbolo",
+            "Ticker",
             "Moneda",
             "Cantidad\nNominal",
             "Variación\nDiaria",
             "Precio Operación\nde Compra",
             "Valor Operación\nde Compra",
-            "Precio\n??ltimo Operado",
+            "Precio\nÚltimo Operado",
             "Valor\nActual (moneda)",
             "Valor ARS",
             "Valor USD",
@@ -1014,12 +1014,12 @@ class PortfolioAppQt(QMainWindow):
         control_layout.setSpacing(10)
         control_layout.setContentsMargins(0, 0, 0, 0)
 
-        # 2) Botón ???Actualizar Datos???
+        # 2) Botón "Actualizar Datos"
         self.actualizar_btn = QPushButton("Actualizar Datos")
         self.actualizar_btn.clicked.connect(self.actualizar_datos_mercado)
         control_layout.addWidget(self.actualizar_btn)
 
-        # 3) Bloque de auto???actualización con QGridLayout
+        # 3) Bloque de auto-actualización con QGridLayout
         auto_frame  = QFrame()
         auto_layout = QGridLayout(auto_frame)
         auto_layout.setContentsMargins(0, 0, 0, 0)
@@ -1031,7 +1031,7 @@ class PortfolioAppQt(QMainWindow):
         self.auto_update_check.stateChanged.connect(self.toggle_auto_update)
         auto_layout.addWidget(self.auto_update_check, 0, 0, 1, 2, alignment=Qt.AlignmentFlag.AlignLeft)
 
-        #   Fila 1: ???Intervalo (min):??? + campo de texto
+        #   Fila 1: "Intervalo (min):" + campo de texto
         self.interval_label = QLabel("Intervalo (min):")
         self.interval_edit  = QLineEdit(str(self.auto_update_interval))
         self.interval_edit.setFixedWidth(40)
@@ -1039,19 +1039,19 @@ class PortfolioAppQt(QMainWindow):
         auto_layout.addWidget(self.interval_label, 1, 0, alignment=Qt.AlignmentFlag.AlignLeft)
         auto_layout.addWidget(self.interval_edit,  1, 1, alignment=Qt.AlignmentFlag.AlignLeft)
 
-        #   Fila 2: cuenta atrás ???Próxima actualización???
+        #   Fila 2: cuenta atrás "Próxima actualización"
         self.countdown_label = QLabel("Próxima actualización: --:--")
         auto_layout.addWidget(self.countdown_label, 2, 0, 1, 2, alignment=Qt.AlignmentFlag.AlignLeft)
 
         control_layout.addWidget(auto_frame)
 
-        # 4) Grupo vertical para ?????ltima actualización???
+        # 4) Grupo vertical para "Última actualización"
         status_group = QVBoxLayout()
         status_group.setSpacing(0)
         status_group.setContentsMargins(0, 0, 0, 0)
 
         self.status_label = QLabel(
-            f"??ltima actualización: {self.last_update if self.last_update else '-'}"
+            f"Última actualización: {self.last_update if self.last_update else '-'}"
         )
         status_group.addWidget(self.status_label, alignment=Qt.AlignmentFlag.AlignLeft)
 
@@ -1070,7 +1070,7 @@ class PortfolioAppQt(QMainWindow):
         # 5) Stretch para empujar el botón final a la derecha
         control_layout.addStretch()
 
-        # 6) Botón ???Actualizar Portafolio???
+        # 6) Botón "Actualizar Portafolio"
         self.update_portfolio_btn = QPushButton("Actualizar Portafolio")
         self.update_portfolio_btn.clicked.connect(self.load_portfolio)
         control_layout.addWidget(self.update_portfolio_btn)
@@ -1093,7 +1093,7 @@ class PortfolioAppQt(QMainWindow):
         fx_rate = 1.0
         if self.df_mercado is not None:
             symbol_col = next((c for c in ["Símbolo.1", "Símbolo", "Simbolo", "Symbol", "Ticker"] if c in self.df_mercado.columns), None)
-            price_col = next((c for c in ["??ltimo Operado", "Ultimo Operado", "Precio", "Close"] if c in self.df_mercado.columns), None)
+            price_col = next((c for c in ["Último Operado", "Ultimo Operado", "Precio", "Close"] if c in self.df_mercado.columns), None)
             if symbol_col and price_col:
                 try:
                     al30 = self.df_mercado[self.df_mercado[symbol_col] == "AL30"].iloc[0][price_col]
@@ -1235,7 +1235,7 @@ class PortfolioAppQt(QMainWindow):
                 'broker': broker,
                 'moneda': moneda_label,
                 'simbolo': broker,
-                'simbolo_display': f"Efectivo ({broker})",
+                'simbolo_display': f"Liquidez {broker}",
                 'detalle': f"Liquidez en {broker}",
                 'precio_prom': 1.0,
                 'cantidad': 0,  # no aplica cantidad única
@@ -1325,7 +1325,7 @@ class PortfolioAppQt(QMainWindow):
 
                     # Buscar columnas disponibles en el CSV de mercado
                     symbol_col = next((c for c in ["Símbolo.1", "Símbolo", "Simbolo", "Symbol", "Ticker"] if c in self.df_mercado.columns), None)
-                    price_col = next((c for c in ["??ltimo Operado", "Ultimo Operado", "Precio", "Close"] if c in self.df_mercado.columns), None)
+                    price_col = next((c for c in ["Último Operado", "Ultimo Operado", "Precio", "Close"] if c in self.df_mercado.columns), None)
                     var_col = next((c for c in ["Variación Diaria", "Variacion Diaria", "Var.%", "Variacion", "Change %"] if c in self.df_mercado.columns), None)
 
                     if symbol_col and price_col:
