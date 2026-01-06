@@ -7,6 +7,7 @@ __pycache__/
 # Datos locales
 data/backup/
 data/Combined_Market_Data.csv
+data/*.db
 
 # IDE/OS
 .idea/
