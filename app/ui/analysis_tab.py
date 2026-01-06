@@ -286,27 +286,16 @@ class AnalysisTab(QWidget):
         table.setEditTriggers(QAbstractItemView.EditTrigger.DoubleClicked | QAbstractItemView.EditTrigger.EditKeyPressed)
         table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
         table.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
-        table.cellClicked.connect(lambda row, col, tab=tab, table=table: self.on_cell_clicked(row, col, tab, table))
+        table.cellClicked.connect(lambda row, col, tipo=tipo_lower, table=table: self.on_cell_clicked(row, col, tipo, table))
         left_layout.addWidget(table)
 
         right_widget = QWidget()
         right_layout = QVBoxLayout(right_widget)
 
-        web_view = QWebEngineView()
-        settings = web_view.settings()
-        settings.setAttribute(QWebEngineSettings.WebAttribute.JavascriptEnabled, True)
-        settings.setAttribute(QWebEngineSettings.WebAttribute.WebGLEnabled, True)
-        settings.setAttribute(QWebEngineSettings.WebAttribute.PluginsEnabled, True)
-        settings.setAttribute(QWebEngineSettings.WebAttribute.JavascriptCanOpenWindows, True)
-        settings.setAttribute(QWebEngineSettings.WebAttribute.LocalContentCanAccessRemoteUrls, True)
-        settings.setAttribute(QWebEngineSettings.WebAttribute.AllowRunningInsecureContent, True)
-        web_view.page().profile().setHttpUserAgent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/99.0.4844.84 Safari/537.36")
-
         exit_button = QPushButton("Salir de Gráfico")
         exit_button.clicked.connect(lambda: self.hide_chart(tipo_lower, right_widget, exit_button))
         exit_button.setVisible(False)
 
-        right_layout.addWidget(web_view)
         right_layout.addWidget(exit_button)
 
         splitter.addWidget(left_widget)
@@ -314,7 +303,9 @@ class AnalysisTab(QWidget):
         right_widget.setVisible(False)
 
         setattr(self, f"table_{tipo_lower}", table)
-        setattr(self, f"web_view_{tipo_lower}", web_view)
+        # WebView se crea de forma diferida para evitar bloqueos en el inicio
+        setattr(self, f"web_view_{tipo_lower}", None)
+        setattr(self, f"right_layout_{tipo_lower}", right_layout)
         setattr(self, f"right_widget_{tipo_lower}", right_widget)
         setattr(self, f"exit_button_{tipo_lower}", exit_button)
         setattr(self, f"symbol_input_{tipo_lower}", symbol_input)
@@ -375,18 +366,32 @@ class AnalysisTab(QWidget):
             table.removeRow(row)
         self.save_data()
 
-    def on_cell_clicked(self, row, column, tab, table):
+    def on_cell_clicked(self, row, column, tipo, table):
         if column == 5:
             symbol_item = table.item(row, 0)
             if symbol_item:
                 symbol = symbol_item.text()
-                self.show_chart(tab.objectName().lower() if tab.objectName() else tab.windowTitle().lower(), symbol)
+                self.show_chart(tipo, symbol)
 
     def show_chart(self, tipo, symbol):
         web_view = getattr(self, f"web_view_{tipo}")
+        right_layout = getattr(self, f"right_layout_{tipo}")
         right_widget = getattr(self, f"right_widget_{tipo}")
         exit_button = getattr(self, f"exit_button_{tipo}")
         splitter = getattr(self, f"splitter_{tipo}")
+
+        if web_view is None:
+            web_view = QWebEngineView()
+            settings = web_view.settings()
+            settings.setAttribute(QWebEngineSettings.WebAttribute.JavascriptEnabled, True)
+            settings.setAttribute(QWebEngineSettings.WebAttribute.WebGLEnabled, True)
+            settings.setAttribute(QWebEngineSettings.WebAttribute.PluginsEnabled, True)
+            settings.setAttribute(QWebEngineSettings.WebAttribute.JavascriptCanOpenWindows, True)
+            settings.setAttribute(QWebEngineSettings.WebAttribute.LocalContentCanAccessRemoteUrls, True)
+            settings.setAttribute(QWebEngineSettings.WebAttribute.AllowRunningInsecureContent, True)
+            web_view.page().profile().setHttpUserAgent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/99.0.4844.84 Safari/537.36")
+            right_layout.insertWidget(0, web_view)
+            setattr(self, f"web_view_{tipo}", web_view)
 
         if tipo == "bonos":
             url = f"https://www.tradingview.com/chart/?symbol=BCBA%3A{symbol}"
