@@ -1,3 +1,6 @@
 pydantic>=1.10,<2.0
 yfinance>=0.2.37
 requests>=2.31.0
+PyQt6>=6.10
+PyQt6-WebEngine>=6.10
+selenium>=4.25
