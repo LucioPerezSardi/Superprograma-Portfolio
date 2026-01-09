@@ -6,6 +6,7 @@ from datetime import datetime, timedelta
 import numpy as np
 import sys
 import sqlite3
+import winreg
 
 # SOLUCION AL PROBLEMA DE MATPLOTLIB/PYQT6
 import matplotlib
@@ -167,7 +168,7 @@ class PortfolioAppQt(QMainWindow):
         self.create_finished_ops_view(self.finished_ops_subtab)
         self.create_journal_view(self.journal_subtab)
         self.create_portfolio_view(self.portfolio_tab)
-        self.apply_theme("light", refresh_tables=False)
+        self.apply_theme(self.detect_system_theme(), refresh_tables=False)
 
         self.compras_pendientes = {}
         self.load_compras_pendientes()
@@ -180,6 +181,17 @@ class PortfolioAppQt(QMainWindow):
         # Conectar cambio de subpestañas en Operaciones
         self.operations_inner_tabs.currentChanged.connect(self.on_inner_tab_changed)
 
+
+    def detect_system_theme(self):
+        try:
+            with winreg.OpenKey(
+                winreg.HKEY_CURRENT_USER,
+                r"Software\\Microsoft\\Windows\\CurrentVersion\\Themes\\Personalize"
+            ) as key:
+                value, _ = winreg.QueryValueEx(key, "AppsUseLightTheme")
+                return "light" if value == 1 else "dark"
+        except OSError:
+            return "light"
 
     def init_themes(self):
         self.themes = {
