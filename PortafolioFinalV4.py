@@ -115,6 +115,10 @@ class PortfolioAppQt(QMainWindow):
         header_layout = QHBoxLayout(header_frame)
         header_layout.setContentsMargins(0, 0, 0, 0)
         header_layout.addStretch()
+        self.mode_toggle_btn = QPushButton("Usuario")
+        self.mode_toggle_btn.setCheckable(True)
+        self.mode_toggle_btn.toggled.connect(self.toggle_developer_mode)
+        header_layout.addWidget(self.mode_toggle_btn)
         self.theme_toggle_btn = QPushButton("Modo oscuro")
         self.theme_toggle_btn.clicked.connect(self.toggle_theme)
         header_layout.addWidget(self.theme_toggle_btn)
@@ -168,6 +172,8 @@ class PortfolioAppQt(QMainWindow):
         self.create_finished_ops_view(self.finished_ops_subtab)
         self.create_journal_view(self.journal_subtab)
         self.create_portfolio_view(self.portfolio_tab)
+        self.tabs.setCurrentWidget(self.portfolio_tab)
+        self.set_navigation_mode(False)
         self.apply_theme(self.detect_system_theme(), refresh_tables=False)
 
         self.compras_pendientes = {}
@@ -245,6 +251,21 @@ class PortfolioAppQt(QMainWindow):
             },
         }
         self.current_theme = "light"
+
+    def toggle_developer_mode(self, checked):
+        self.set_navigation_mode(checked)
+
+    def set_navigation_mode(self, developer_mode):
+        self.developer_mode = developer_mode
+        if developer_mode:
+            self.mode_toggle_btn.setText("Usuario")
+            self.tabs.tabBar().show()
+            self.operations_inner_tabs.tabBar().show()
+        else:
+            self.mode_toggle_btn.setText("Desarrollador")
+            self.tabs.setCurrentWidget(self.portfolio_tab)
+            self.tabs.tabBar().hide()
+            self.operations_inner_tabs.tabBar().hide()
 
     def get_theme_value(self, key, fallback):
         theme = self.themes.get(self.current_theme, {})
