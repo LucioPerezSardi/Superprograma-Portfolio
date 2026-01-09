@@ -21,10 +21,10 @@ from PyQt6.QtWidgets import (
     QLabel, QLineEdit, QPushButton, QComboBox, QScrollArea, QFrame, QTableWidget,
     QTableWidgetItem, QHeaderView, QAbstractItemView, QMessageBox, QRadioButton,
     QButtonGroup, QGroupBox, QAbstractScrollArea, QSizePolicy, QSplitter,
-    QStyleFactory, QCheckBox, QDateEdit
+    QStyleFactory, QCheckBox, QDateEdit, QListWidget, QListWidgetItem
 )
 from PyQt6.QtCore import Qt, QSize, QUrl, QTimer, QDate
-from PyQt6.QtGui import QColor, QFont, QBrush
+from PyQt6.QtGui import QColor, QFont, QBrush, QIcon, QPixmap
 from PyQt6.QtWebEngineWidgets import QWebEngineView
 from PyQt6.QtWebEngineCore import QWebEngineSettings
 
@@ -129,6 +129,16 @@ class PortfolioAppQt(QMainWindow):
         self.last_update = None
         self.cargar_datos_mercado()
         self.default_fx_rate = 1.0
+        self.broker_colors = {
+            "IOL": "#4e79a7",
+            "BMB": "#f28e2b",
+            "COCOS": "#59a14f",
+            "BALANZ": "#e15759",
+            "BINANCE": "#76b7b2",
+            "KUCOIN": "#edc948",
+            "BYBIT": "#b07aa1",
+            "BINGX": "#ff9da7",
+        }
 
         # Inicializar atributos para actualización automática
         self.auto_update_interval = 5  # Valor por defecto en minutos
@@ -174,13 +184,14 @@ class PortfolioAppQt(QMainWindow):
         self.create_operation_form(self.operation_subtab)
         self.create_finished_ops_view(self.finished_ops_subtab)
         self.create_journal_view(self.journal_subtab)
-        self.user_portfolio_view = self.create_portfolio_view(self.user_portfolio_tab)
-        self.dev_portfolio_view = self.create_portfolio_view(self.dev_portfolio_tab)
+        self.user_portfolio_view = self.create_portfolio_view(self.user_portfolio_tab, is_user=True)
+        self.dev_portfolio_view = self.create_portfolio_view(self.dev_portfolio_tab, is_user=False)
         self.portfolio_views = [self.user_portfolio_view, self.dev_portfolio_view]
         self.portfolio_views_by_tab = {
             self.user_portfolio_tab: self.user_portfolio_view,
             self.dev_portfolio_tab: self.dev_portfolio_view,
         }
+        self.configure_user_portfolio_headers()
         self.tabs.setCurrentWidget(self.user_portfolio_tab)
         self.set_navigation_mode(False)
         self.apply_theme(self.detect_system_theme(), refresh_tables=False)
@@ -304,6 +315,27 @@ class PortfolioAppQt(QMainWindow):
         for view in self.get_portfolio_views():
             self.load_portfolio(view)
 
+    def configure_user_portfolio_headers(self):
+        view = self.user_portfolio_view
+        view.portfolio_table.setHorizontalHeaderLabels([
+            "Categoría",
+            "Ticker",
+            "Moneda",
+            "Cantidad\nNominal",
+            "Variación\nDiaria",
+            "PPC",
+            "Capital Total Invertido",
+            "Precio\nÚltimo Operado",
+            "Valor\nActual (moneda)",
+            "Valor ARS",
+            "Valor USD",
+            "% del\nPortafolio (ARS)",
+            "Resultado ARS (%)"
+        ])
+        header_ppc = view.portfolio_table.horizontalHeaderItem(5)
+        if header_ppc:
+            header_ppc.setToolTip("PRECIO PROMEDIO DE COMPRA")
+
     def update_status_labels(self, message=None):
         if message is None:
             message = f"Última actualización: {self.last_update if self.last_update else '-'}"
@@ -320,6 +352,135 @@ class PortfolioAppQt(QMainWindow):
             view.interval_edit.blockSignals(True)
             view.interval_edit.setText(str(self.auto_update_interval))
             view.interval_edit.blockSignals(False)
+
+    def get_broker_color(self, broker):
+        return self.broker_colors.get(broker, "#9aa0a6")
+
+    def toggle_liquidity_chart(self, view):
+        if not getattr(view, "is_user", False):
+            return
+        visible = not view.liquidity_chart_frame.isVisible()
+        view.liquidity_chart_frame.setVisible(visible)
+        if visible:
+            self.draw_liquidity_chart(view)
+
+    def set_liquidity_currency(self, currency, view):
+        if not getattr(view, "is_user", False):
+            return
+        view.liquidity_currency = currency
+        view.liquidity_ars_btn.setChecked(currency == "ARS")
+        view.liquidity_usd_btn.setChecked(currency == "USD")
+        if view.liquidity_chart_frame.isVisible():
+            self.draw_liquidity_chart(view)
+
+    def draw_liquidity_chart(self, view):
+        for i in reversed(range(view.liquidity_chart_layout.count())):
+            widget = view.liquidity_chart_layout.itemAt(i).widget()
+            if widget:
+                widget.setParent(None)
+        view.liquidity_list.clear()
+
+        liquidity_by_broker = getattr(view, "liquidity_by_broker", {})
+        data = liquidity_by_broker.get(view.liquidity_currency, {})
+        labels = []
+        values = []
+        for broker, amount in data.items():
+            if abs(amount) > 0.0001:
+                labels.append(broker)
+                values.append(abs(amount))
+
+        if not values:
+            no_data_label = QLabel("No hay liquidez para mostrar")
+            view.liquidity_chart_layout.addWidget(no_data_label)
+            return
+
+        fig = Figure(figsize=(5, 4), dpi=100)
+        ax = fig.add_subplot(111)
+        colors = [self.get_broker_color(broker) for broker in labels]
+
+        def pct_label(pct):
+            return f"{pct:.1f}%" if pct >= 6 else ""
+
+        wedges, _texts, _autotexts = ax.pie(
+            values,
+            labels=None,
+            autopct=pct_label,
+            startangle=90,
+            colors=colors[:len(labels)],
+            textprops={'fontsize': 9}
+        )
+        ax.set_title(f'Distribución de liquidez en {view.liquidity_currency}', fontsize=12, pad=20)
+        fig.subplots_adjust(top=0.82)
+        ax.axis('equal')
+
+        canvas = FigureCanvasQTAgg(fig)
+        view.liquidity_chart_layout.addWidget(canvas)
+
+        total = sum(values) if values else 1
+        currency_prefix = "USD" if view.liquidity_currency == "USD" else "ARS"
+        for broker, amount in sorted(data.items(), key=lambda x: x[0]):
+            if abs(amount) <= 0.0001:
+                continue
+            pct = (abs(amount) / total) * 100 if total else 0
+            value_str = f"{currency_prefix} ${abs(amount):,.2f}"
+            item = QListWidgetItem(f"{broker}: {value_str} ({pct:.2f}%)")
+            pixmap = QPixmap(10, 10)
+            pixmap.fill(QColor(self.get_broker_color(broker)))
+            item.setIcon(QIcon(pixmap))
+            view.liquidity_list.addItem(item)
+
+        tooltip = ax.annotate(
+            "",
+            xy=(0, 0),
+            xytext=(12, 12),
+            textcoords="offset points",
+            bbox=dict(boxstyle="round", fc="white", ec="gray", alpha=0.9),
+            arrowprops=dict(arrowstyle="->")
+        )
+        tooltip.set_visible(False)
+
+        def on_move(event, wedges=wedges, brokers=labels, values=values, tooltip=tooltip):
+            if event.inaxes != ax:
+                if tooltip.get_visible():
+                    tooltip.set_visible(False)
+                    canvas.draw_idle()
+                return
+            for idx, wedge in enumerate(wedges):
+                contains, _ = wedge.contains(event)
+                if contains:
+                    pct = (values[idx] / total) * 100 if total else 0
+                    value_str = f"{currency_prefix} ${values[idx]:,.2f}"
+                    tooltip.xy = (event.xdata, event.ydata)
+                    tooltip.set_text(f"{brokers[idx]}: {value_str} ({pct:.1f}%)")
+                    tooltip.set_visible(True)
+                    canvas.draw_idle()
+                    return
+            if tooltip.get_visible():
+                tooltip.set_visible(False)
+                canvas.draw_idle()
+
+        canvas.mpl_connect("motion_notify_event", on_move)
+
+    def update_liquidity_section(self, view, total_assets_ars, fx_rate):
+        liquidity_by_broker = getattr(view, "liquidity_by_broker", {})
+        total_liq_ars = sum(liquidity_by_broker.get("ARS", {}).values())
+        total_liq_usd = sum(liquidity_by_broker.get("USD", {}).values())
+        total_liq_ars_equiv = total_liq_ars + (total_liq_usd * fx_rate if fx_rate else 0)
+        total_portfolio_ars = total_assets_ars + total_liq_ars_equiv
+        if total_portfolio_ars > 0:
+            liquidity_pct = (total_liq_ars_equiv / total_portfolio_ars) * 100
+        else:
+            liquidity_pct = 0
+
+        view.liquidity_button.setText(
+            f"LIQUIDEZ TOTAL: ARS ${total_liq_ars:,.2f} | USD ${total_liq_usd:,.2f}"
+        )
+        view.liquidity_total_label.setText(
+            f"El total de su capital líquido es ${total_liq_ars_equiv:,.2f} ({liquidity_pct:.2f}%)"
+        )
+        view.total_assets_ars = total_assets_ars
+        view.total_liq_ars_equiv = total_liq_ars_equiv
+        view.total_portfolio_ars = total_portfolio_ars
 
     def update_countdown(self):
         """Actualizar la cuenta regresiva visual"""
@@ -1109,10 +1270,63 @@ class PortfolioAppQt(QMainWindow):
         self.ingreso_total_label.clear()
         self.balance_label.clear()
 
-    def create_portfolio_view(self, parent_widget):
+    def create_portfolio_view(self, parent_widget, is_user=False):
         view = SimpleNamespace()
+        view.is_user = is_user
         layout = QVBoxLayout(parent_widget)
         view.layout = layout
+
+        if is_user:
+            view.liquidity_frame = QFrame()
+            liquidity_layout = QVBoxLayout(view.liquidity_frame)
+            liquidity_layout.setContentsMargins(0, 0, 0, 0)
+
+            liquidity_header = QHBoxLayout()
+            view.liquidity_button = QPushButton("LIQUIDEZ TOTAL: ARS $0.00 | USD $0.00")
+            view.liquidity_button.setCursor(Qt.CursorShape.PointingHandCursor)
+            view.liquidity_button.clicked.connect(
+                lambda _checked=False, v=view: self.toggle_liquidity_chart(v)
+            )
+            liquidity_header.addWidget(view.liquidity_button)
+
+            view.liquidity_currency = "ARS"
+            view.liquidity_ars_btn = QPushButton("ARS")
+            view.liquidity_ars_btn.setCheckable(True)
+            view.liquidity_ars_btn.setChecked(True)
+            view.liquidity_ars_btn.clicked.connect(
+                lambda _checked=False, v=view: self.set_liquidity_currency("ARS", v)
+            )
+            view.liquidity_usd_btn = QPushButton("USD")
+            view.liquidity_usd_btn.setCheckable(True)
+            view.liquidity_usd_btn.clicked.connect(
+                lambda _checked=False, v=view: self.set_liquidity_currency("USD", v)
+            )
+            liquidity_header.addWidget(view.liquidity_ars_btn)
+            liquidity_header.addWidget(view.liquidity_usd_btn)
+            liquidity_header.addStretch()
+            liquidity_layout.addLayout(liquidity_header)
+
+            view.liquidity_chart_frame = QFrame()
+            chart_frame_layout = QVBoxLayout(view.liquidity_chart_frame)
+            chart_list_layout = QHBoxLayout()
+
+            view.liquidity_chart_container = QFrame()
+            view.liquidity_chart_layout = QVBoxLayout(view.liquidity_chart_container)
+            chart_list_layout.addWidget(view.liquidity_chart_container, 2)
+
+            view.liquidity_list = QListWidget()
+            view.liquidity_list.setMinimumWidth(220)
+            chart_list_layout.addWidget(view.liquidity_list, 1)
+
+            chart_frame_layout.addLayout(chart_list_layout)
+            view.liquidity_chart_frame.setVisible(False)
+            view.liquidity_total_label = QLabel(
+                "El total de su capital líquido es $0.00 (0.00%)"
+            )
+            chart_frame_layout.addWidget(view.liquidity_total_label)
+            liquidity_layout.addWidget(view.liquidity_chart_frame)
+
+            layout.addWidget(view.liquidity_frame)
 
         # Crear pestañas internas
         view.portfolio_tabs = QTabWidget()
@@ -1163,6 +1377,8 @@ class PortfolioAppQt(QMainWindow):
         # Añadir pestañas
         view.portfolio_tabs.addTab(view.table_tab, "Tabla")
         view.portfolio_tabs.addTab(view.chart_tab, "Gráfico")
+        if is_user:
+            view.portfolio_tabs.setTabText(0, "ACTIVOS")
 
         # 1) Marco y layout principal de controles
         control_frame  = QFrame()
@@ -1385,6 +1601,11 @@ class PortfolioAppQt(QMainWindow):
         cash_by_broker_ars = self.get_cash_by_broker("ARS")
         cash_by_broker_usd = self.get_cash_by_broker("USD")
         fx_rate = self.detect_fx_rate()
+        if getattr(view, "is_user", False):
+            view.liquidity_by_broker = {
+                "ARS": cash_by_broker_ars,
+                "USD": cash_by_broker_usd
+            }
 
         portfolio_data = []
         # Inicializar total_valor a 0 (se calcularó despuós)
@@ -1585,46 +1806,72 @@ class PortfolioAppQt(QMainWindow):
                 tipo_valores[item['tipo']] = valor_ars
             total_valor_actual_usd += valor_usd
 
+        table_data = portfolio_data
+        total_assets_ars = total_valor_ars
+        if getattr(view, "is_user", False):
+            table_data = [p for p in portfolio_data if p.get('tipo') not in ("Efectivo", "Efectivo Líquido")]
+            total_assets_ars = sum(p.get('valor_ars', 0) for p in table_data)
+            total_valor_ars = total_assets_ars
+            total_valor_usd = sum(p.get('valor_usd', 0) for p in table_data)
+            tipo_valores = {}
+            for p in table_data:
+                tipo_valores[p['tipo']] = tipo_valores.get(p['tipo'], 0) + p.get('valor_ars', 0)
+
         # Aplicar filtro de moneda si corresponde
         filtro_moneda = getattr(view, "currency_filter_combo", None)
         moneda_seleccionada = filtro_moneda.currentText() if filtro_moneda else "Todos"
         if moneda_seleccionada != "Todos":
-            portfolio_data = [p for p in portfolio_data if p.get('moneda', 'ARS') == moneda_seleccionada or (p['tipo'] == "Efectivo" and p.get('moneda', 'ARS') == moneda_seleccionada)]
+            table_data = [p for p in table_data if p.get('moneda', 'ARS') == moneda_seleccionada]
             # Recalcular categorías con el filtro aplicado
             tipo_valores = {}
-            for p in portfolio_data:
+            for p in table_data:
                 tipo_valores[p['tipo']] = tipo_valores.get(p['tipo'], 0) + p.get('valor_ars', 0)
-            total_valor_ars = sum(p.get('valor_ars', 0) for p in portfolio_data)
-            total_valor_usd = sum(p.get('valor_usd', 0) for p in portfolio_data)
+            total_valor_ars = sum(p.get('valor_ars', 0) for p in table_data)
+            total_valor_usd = sum(p.get('valor_usd', 0) for p in table_data)
             total_valor = total_valor_ars
         else:
             total_valor = total_valor_ars
 
+        if getattr(view, "is_user", False):
+            self.update_liquidity_section(view, total_assets_ars, fx_rate)
+
         # Orden de categorías
-        orden_categorias = {
-            "Liquidez Actual": 0,
-            "Plazo Fijo": 1,
-            "FCI": 2,
-            "Bonos AR": 3,
-            "Acciones AR": 4,
-            "CEDEARs": 5,
-            "ETFs": 6,
-            "Criptomonedas": 7,
-            "Cauciones": 8
-        }
+        if getattr(view, "is_user", False):
+            orden_categorias = {
+                "Plazo Fijo": 1,
+                "FCI": 2,
+                "Bonos AR": 3,
+                "Acciones AR": 4,
+                "CEDEARs": 5,
+                "ETFs": 6,
+                "Criptomonedas": 7,
+                "Cauciones": 8
+            }
+        else:
+            orden_categorias = {
+                "Liquidez Actual": 0,
+                "Plazo Fijo": 1,
+                "FCI": 2,
+                "Bonos AR": 3,
+                "Acciones AR": 4,
+                "CEDEARs": 5,
+                "ETFs": 6,
+                "Criptomonedas": 7,
+                "Cauciones": 8
+            }
 
         categorias = {}
-        for item in portfolio_data:
+        for item in table_data:
             cat = item['tipo']
             # Renombrar efectivo a Liquidez Actual
-            if cat in ["Efectivo", "Efectivo Líquido"]:
+            if not getattr(view, "is_user", False) and cat in ["Efectivo", "Efectivo Líquido"]:
                 cat = "Liquidez Actual"
             if cat not in categorias:
                 categorias[cat] = []
             categorias[cat].append(item)
 
         # Guardar datos para gráficos
-        view.portfolio_data = portfolio_data
+        view.portfolio_data = table_data
         view.categorias = categorias
         self.total_valor = total_valor
         self.total_valor_usd = total_valor_usd
@@ -1685,6 +1932,10 @@ class PortfolioAppQt(QMainWindow):
                 variacion_str = f"{item['variacion_diaria']:.2f}%" if item['variacion_diaria'] is not None else "N/D"
                 diferencia_valor_str = f"${item['diferencia_valor']:,.2f}"
                 resultado_str = f"${item['resultado']:,.2f}"
+                if getattr(view, "is_user", False) and item['precio_operacion_compra'] != 0 and item['precio_actual'] is not None:
+                    rendimiento_pct = ((item['precio_actual'] - item['precio_operacion_compra']) / item['precio_operacion_compra']) * 100
+                    rendimiento_str = f"{rendimiento_pct:.2f}%".replace(".", ",")
+                    resultado_str = f"{resultado_str} ({rendimiento_str})"
 
                 # Calcular % del portafolio usando el total_valor (suma de todos los valores actuales)
                 if total_valor > 0:
@@ -1734,7 +1985,19 @@ class PortfolioAppQt(QMainWindow):
         view.portfolio_table.setItem(row_idx, 0, QTableWidgetItem("TOTAL"))
         view.portfolio_table.setItem(row_idx, 9, QTableWidgetItem(f"${total_valor_actual:,.2f}"))
         view.portfolio_table.setItem(row_idx, 10, QTableWidgetItem(f"${total_valor_usd_tabla:,.2f}"))
-        view.portfolio_table.setItem(row_idx, 11, QTableWidgetItem(f"{suma_porcentajes:.2f}%"))
+        total_pct_item = QTableWidgetItem(f"{suma_porcentajes:.2f}%")
+        if getattr(view, "is_user", False):
+            total_assets_ars = getattr(view, "total_assets_ars", total_valor_actual)
+            total_portfolio_ars = getattr(view, "total_portfolio_ars", total_assets_ars)
+            if total_portfolio_ars > 0:
+                assets_pct = (total_assets_ars / total_portfolio_ars) * 100
+            else:
+                assets_pct = 0
+            total_pct_item.setText(f"{suma_porcentajes:.2f}% ({assets_pct:.2f}%)")
+            total_pct_item.setToolTip(
+                "Porcentaje de activos sobre el total del portafolio (incluye liquidez)."
+            )
+        view.portfolio_table.setItem(row_idx, 11, total_pct_item)
         view.portfolio_table.setItem(row_idx, 12, QTableWidgetItem(f"${total_resultado:,.2f}"))
 
         # Estilo fila total
