@@ -109,6 +109,16 @@ class PortfolioAppQt(QMainWindow):
         self.main_layout = QVBoxLayout(central_widget)
         self.setCentralWidget(central_widget)  # <-- Añadir esta línea
 
+        self.init_themes()
+        header_frame = QFrame()
+        header_layout = QHBoxLayout(header_frame)
+        header_layout.setContentsMargins(0, 0, 0, 0)
+        header_layout.addStretch()
+        self.theme_toggle_btn = QPushButton("Modo oscuro")
+        self.theme_toggle_btn.clicked.connect(self.toggle_theme)
+        header_layout.addWidget(self.theme_toggle_btn)
+        self.main_layout.addWidget(header_frame)
+
         self.df_mercado = None
         self.last_update = None
         self.cargar_datos_mercado()
@@ -157,6 +167,7 @@ class PortfolioAppQt(QMainWindow):
         self.create_finished_ops_view(self.finished_ops_subtab)
         self.create_journal_view(self.journal_subtab)
         self.create_portfolio_view(self.portfolio_tab)
+        self.apply_theme("light", refresh_tables=False)
 
         self.compras_pendientes = {}
         self.load_compras_pendientes()
@@ -168,6 +179,81 @@ class PortfolioAppQt(QMainWindow):
         self.tabs.currentChanged.connect(self.on_tab_changed)
         # Conectar cambio de subpestañas en Operaciones
         self.operations_inner_tabs.currentChanged.connect(self.on_inner_tab_changed)
+
+
+    def init_themes(self):
+        self.themes = {
+            "light": {
+                "filter_info_color": "#1b5fd1",
+                "table_category_bg": "#e6e6e6",
+                "table_category_alt_bg": "#f0f0f0",
+                "table_total_bg": "#dcdcdc",
+                "qss": (
+                    "QWidget { background: #f6f7f9; color: #1a1a1a; }"
+                    "QMainWindow { background: #f6f7f9; }"
+                    "QTabWidget::pane { border: 1px solid #c9c9c9; background: #ffffff; }"
+                    "QTabBar::tab { background: #e9eaee; padding: 6px 12px; border: 1px solid #c9c9c9; border-bottom: none; }"
+                    "QTabBar::tab:selected { background: #ffffff; font-weight: 600; }"
+                    "QLineEdit, QComboBox, QDateEdit { background: #ffffff; border: 1px solid #c9c9c9; padding: 4px; border-radius: 4px; }"
+                    "QTableWidget { background: #ffffff; gridline-color: #d8d8d8; }"
+                    "QHeaderView::section { background: #e9eaee; padding: 4px; border: 1px solid #c9c9c9; }"
+                    "QPushButton { background: #1f6feb; color: #ffffff; border: none; padding: 6px 12px; border-radius: 4px; }"
+                    "QPushButton:hover { background: #1b5fd1; }"
+                    "QPushButton:pressed { background: #174fb0; }"
+                    "QPushButton:disabled { background: #a7a7a7; color: #f2f2f2; }"
+                    "QGroupBox { border: 1px solid #c9c9c9; margin-top: 8px; }"
+                    "QGroupBox::title { subcontrol-origin: margin; left: 8px; padding: 0 4px; }"
+                    "QScrollArea { border: none; }"
+                    "QCheckBox, QRadioButton { spacing: 6px; }"
+                ),
+            },
+            "dark": {
+                "filter_info_color": "#8ab4f8",
+                "table_category_bg": "#2a313b",
+                "table_category_alt_bg": "#242b33",
+                "table_total_bg": "#303845",
+                "qss": (
+                    "QWidget { background: #14171a; color: #e6e6e6; }"
+                    "QMainWindow { background: #14171a; }"
+                    "QTabWidget::pane { border: 1px solid #2f3742; background: #1b1f24; }"
+                    "QTabBar::tab { background: #232831; padding: 6px 12px; border: 1px solid #2f3742; border-bottom: none; }"
+                    "QTabBar::tab:selected { background: #1b1f24; font-weight: 600; }"
+                    "QLineEdit, QComboBox, QDateEdit { background: #1b1f24; border: 1px solid #3a424d; padding: 4px; border-radius: 4px; }"
+                    "QTableWidget { background: #1b1f24; gridline-color: #2f3742; }"
+                    "QHeaderView::section { background: #232831; padding: 4px; border: 1px solid #2f3742; }"
+                    "QPushButton { background: #2d6cdf; color: #ffffff; border: none; padding: 6px 12px; border-radius: 4px; }"
+                    "QPushButton:hover { background: #255fcb; }"
+                    "QPushButton:pressed { background: #1f52b0; }"
+                    "QPushButton:disabled { background: #4a5563; color: #c8c8c8; }"
+                    "QGroupBox { border: 1px solid #2f3742; margin-top: 8px; }"
+                    "QGroupBox::title { subcontrol-origin: margin; left: 8px; padding: 0 4px; }"
+                    "QScrollArea { border: none; }"
+                    "QCheckBox, QRadioButton { spacing: 6px; }"
+                ),
+            },
+        }
+        self.current_theme = "light"
+
+    def get_theme_value(self, key, fallback):
+        theme = self.themes.get(self.current_theme, {})
+        return theme.get(key, fallback)
+
+    def toggle_theme(self):
+        new_theme = "dark" if self.current_theme == "light" else "light"
+        self.apply_theme(new_theme)
+
+    def apply_theme(self, theme_key, refresh_tables=True):
+        theme = self.themes.get(theme_key, self.themes["light"])
+        self.current_theme = theme_key
+        app = QApplication.instance()
+        if app:
+            app.setStyleSheet(theme["qss"])
+        if hasattr(self, "filter_info_label"):
+            self.filter_info_label.setStyleSheet(f"color: {theme['filter_info_color']};")
+        if hasattr(self, "theme_toggle_btn"):
+            self.theme_toggle_btn.setText("Modo claro" if theme_key == "dark" else "Modo oscuro")
+        if refresh_tables and hasattr(self, "portfolio_table"):
+            self.load_portfolio()
 
     def update_countdown(self):
         """Actualizar la cuenta regresiva visual"""
@@ -266,7 +352,6 @@ class PortfolioAppQt(QMainWindow):
 
         # Etiqueta de información de filtro
         self.filter_info_label = QLabel()
-        self.filter_info_label.setStyleSheet("color: blue;")
         layout.addWidget(self.filter_info_label)
 
         # Conectar cambios en los radio buttons
@@ -1483,9 +1568,9 @@ class PortfolioAppQt(QMainWindow):
                     item = QTableWidgetItem("")
                     self.portfolio_table.setItem(row_idx, col, item)
                 if col == 0:
-                    item.setBackground(QColor('#e0e0e0'))
+                    item.setBackground(QColor(self.get_theme_value("table_category_bg", "#e0e0e0")))
                 else:
-                    item.setBackground(QColor('#f0f0f0'))
+                    item.setBackground(QColor(self.get_theme_value("table_category_alt_bg", "#f0f0f0")))
                 font = item.font()
                 font.setBold(True)
                 item.setFont(font)
@@ -1569,7 +1654,7 @@ class PortfolioAppQt(QMainWindow):
             if item is None:
                 item = QTableWidgetItem("")
                 self.portfolio_table.setItem(row_idx, col, item)
-            item.setBackground(QColor('lightgray'))
+            item.setBackground(QColor(self.get_theme_value("table_total_bg", "lightgray")))
             font = item.font()
             font.setBold(True)
             item.setFont(font)
