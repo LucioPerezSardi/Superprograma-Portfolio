@@ -7,6 +7,7 @@ import numpy as np
 import sys
 import sqlite3
 import winreg
+from types import SimpleNamespace
 
 # SOLUCION AL PROBLEMA DE MATPLOTLIB/PYQT6
 import matplotlib
@@ -159,27 +160,35 @@ class PortfolioAppQt(QMainWindow):
         self.operations_inner_tabs.addTab(self.journal_subtab, "Libro Diario")
 
         # Otras pestañas principales
-        self.portfolio_tab = QWidget()
+        self.user_portfolio_tab = QWidget()
+        self.dev_portfolio_tab = QWidget()
         self.analysis_tab = AnalysisTab(self)
 
         # Agregar pestañas principales
         self.tabs.addTab(self.operations_tab, "Operaciones")
-        self.tabs.addTab(self.portfolio_tab, "Portafolio Actual")
+        self.tabs.addTab(self.user_portfolio_tab, "Portafolio Actual (Usuario)")
+        self.tabs.addTab(self.dev_portfolio_tab, "Portafolio Actual")
         self.tabs.addTab(self.analysis_tab, "Análisis")
 
         # Inicializar subpestañas con los widgets existentes
         self.create_operation_form(self.operation_subtab)
         self.create_finished_ops_view(self.finished_ops_subtab)
         self.create_journal_view(self.journal_subtab)
-        self.create_portfolio_view(self.portfolio_tab)
-        self.tabs.setCurrentWidget(self.portfolio_tab)
+        self.user_portfolio_view = self.create_portfolio_view(self.user_portfolio_tab)
+        self.dev_portfolio_view = self.create_portfolio_view(self.dev_portfolio_tab)
+        self.portfolio_views = [self.user_portfolio_view, self.dev_portfolio_view]
+        self.portfolio_views_by_tab = {
+            self.user_portfolio_tab: self.user_portfolio_view,
+            self.dev_portfolio_tab: self.dev_portfolio_view,
+        }
+        self.tabs.setCurrentWidget(self.user_portfolio_tab)
         self.set_navigation_mode(False)
         self.apply_theme(self.detect_system_theme(), refresh_tables=False)
 
         self.compras_pendientes = {}
         self.load_compras_pendientes()
         self.recalcular_portfolio()
-        self.load_portfolio()
+        self.refresh_portfolios()
         self.load_journal()
         self.plazo_fijo_counter = self.get_next_plazo_fijo_number()
 
@@ -263,7 +272,7 @@ class PortfolioAppQt(QMainWindow):
             self.operations_inner_tabs.tabBar().show()
         else:
             self.mode_toggle_btn.setText("Desarrollador")
-            self.tabs.setCurrentWidget(self.portfolio_tab)
+            self.tabs.setCurrentWidget(self.user_portfolio_tab)
             self.tabs.tabBar().hide()
             self.operations_inner_tabs.tabBar().hide()
 
@@ -285,8 +294,32 @@ class PortfolioAppQt(QMainWindow):
             self.filter_info_label.setStyleSheet(f"color: {theme['filter_info_color']};")
         if hasattr(self, "theme_toggle_btn"):
             self.theme_toggle_btn.setText("Modo claro" if theme_key == "dark" else "Modo oscuro")
-        if refresh_tables and hasattr(self, "portfolio_table"):
-            self.load_portfolio()
+        if refresh_tables:
+            self.refresh_portfolios()
+
+    def get_portfolio_views(self):
+        return getattr(self, "portfolio_views", [])
+
+    def refresh_portfolios(self):
+        for view in self.get_portfolio_views():
+            self.load_portfolio(view)
+
+    def update_status_labels(self, message=None):
+        if message is None:
+            message = f"Última actualización: {self.last_update if self.last_update else '-'}"
+        for view in self.get_portfolio_views():
+            view.status_label.setText(message)
+
+    def sync_auto_update_controls(self, source_view=None):
+        for view in self.get_portfolio_views():
+            if source_view is not None and view is source_view:
+                continue
+            view.auto_update_check.blockSignals(True)
+            view.auto_update_check.setChecked(self.auto_update_active)
+            view.auto_update_check.blockSignals(False)
+            view.interval_edit.blockSignals(True)
+            view.interval_edit.setText(str(self.auto_update_interval))
+            view.interval_edit.blockSignals(False)
 
     def update_countdown(self):
         """Actualizar la cuenta regresiva visual"""
@@ -296,9 +329,9 @@ class PortfolioAppQt(QMainWindow):
         self.remaining_time -= 1
         minutes = self.remaining_time // 60
         seconds = self.remaining_time % 60
-        self.countdown_label.setText(
-            f"Próxima actualización en: {minutes:02d}:{seconds:02d}"
-        )
+        text = f"Próxima actualización en: {minutes:02d}:{seconds:02d}"
+        for view in self.get_portfolio_views():
+            view.countdown_label.setText(text)
 
     def start_auto_update(self):
         """Iniciar la actualización automática con cuenta regresiva"""
@@ -315,14 +348,14 @@ class PortfolioAppQt(QMainWindow):
         self.countdown_timer.start(1000)
 
     def on_tab_changed(self, index):
-        tab_name = self.tabs.tabText(index)
-        if tab_name == "Operaciones":
+        current_widget = self.tabs.widget(index)
+        if current_widget == self.operations_tab:
             inner_tab_name = self.operations_inner_tabs.tabText(self.operations_inner_tabs.currentIndex())
             if inner_tab_name == "Operaciones Finalizadas":
                 self.load_finished_operations()
-        elif tab_name == "Portafolio Actual":
-            self.load_portfolio()
-        elif tab_name == "Análisis":
+        elif current_widget in self.portfolio_views_by_tab:
+            self.load_portfolio(self.portfolio_views_by_tab[current_widget])
+        elif current_widget == self.analysis_tab:
             self.analysis_tab.load_portfolio()
             self.analysis_tab.load_saved_data()
             self.analysis_tab.sort_tables()  # Actualizar ordenamiento
@@ -555,10 +588,11 @@ class PortfolioAppQt(QMainWindow):
     def cargar_datos_mercado(self):
         try:
             self.df_mercado, self.last_update = load_market_data()
-            if self.df_mercado is not None and hasattr(self, 'status_label') and self.last_update:
-                self.status_label.setText(f"Última actualización: {self.last_update}")
+            if self.df_mercado is not None and self.last_update:
+                self.update_status_labels()
             if self.df_mercado is None:
                 self.last_update = None
+                self.update_status_labels()
         except Exception as e:
             QMessageBox.critical(self, "Error", f"Error cargando datos de mercado: {str(e)}")
             self.df_mercado = None
@@ -567,8 +601,9 @@ class PortfolioAppQt(QMainWindow):
         if hasattr(self, 'update_thread') and self.update_thread.isRunning():
             return
 
-        self.actualizar_btn.setEnabled(False)
-        self.status_label.setText("Descargando datos de mercado...")
+        for view in self.get_portfolio_views():
+            view.actualizar_btn.setEnabled(False)
+            view.status_label.setText("Descargando datos de mercado...")
 
         # Usar QThread correctamente
         self.update_thread = DownloadThread(DATA_DIR)
@@ -576,12 +611,13 @@ class PortfolioAppQt(QMainWindow):
         self.update_thread.start()
 
     def on_download_finished(self, success, message):
-        self.actualizar_btn.setEnabled(True)
-        self.status_label.setText(message)
+        for view in self.get_portfolio_views():
+            view.actualizar_btn.setEnabled(True)
+        self.update_status_labels(message)
 
         if success:
             self.cargar_datos_mercado()
-            self.load_portfolio()
+            self.refresh_portfolios()
             self.load_finished_operations()
 
         # Reiniciar actualización automática
@@ -1039,7 +1075,7 @@ class PortfolioAppQt(QMainWindow):
             QMessageBox.information(self, "Éxito", "Operación registrada correctamente")
             self.limpiar_formulario()
             self.load_journal()
-            self.load_portfolio()
+            self.refresh_portfolios()
             self.load_finished_operations()
 
             # Actualizar pestaña de Análisis
@@ -1074,19 +1110,21 @@ class PortfolioAppQt(QMainWindow):
         self.balance_label.clear()
 
     def create_portfolio_view(self, parent_widget):
+        view = SimpleNamespace()
         layout = QVBoxLayout(parent_widget)
+        view.layout = layout
 
         # Crear pestañas internas
-        self.portfolio_tabs = QTabWidget()
-        layout.addWidget(self.portfolio_tabs)
+        view.portfolio_tabs = QTabWidget()
+        layout.addWidget(view.portfolio_tabs)
 
         # Tabla
-        self.table_tab = QWidget()
-        self.table_layout = QVBoxLayout(self.table_tab)
+        view.table_tab = QWidget()
+        view.table_layout = QVBoxLayout(view.table_tab)
 
-        self.portfolio_table = QTableWidget()
-        self.portfolio_table.setColumnCount(13)
-        self.portfolio_table.setHorizontalHeaderLabels([
+        view.portfolio_table = QTableWidget()
+        view.portfolio_table.setColumnCount(13)
+        view.portfolio_table.setHorizontalHeaderLabels([
             "Categoría",
             "Ticker",
             "Moneda",
@@ -1101,30 +1139,30 @@ class PortfolioAppQt(QMainWindow):
             "% del\nPortafolio (ARS)",
             "Resultado ARS"
         ])
-        self.portfolio_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
-        self.portfolio_table.verticalHeader().setVisible(False)
-        self.portfolio_table.setSizeAdjustPolicy(QAbstractScrollArea.SizeAdjustPolicy.AdjustToContents)
+        view.portfolio_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
+        view.portfolio_table.verticalHeader().setVisible(False)
+        view.portfolio_table.setSizeAdjustPolicy(QAbstractScrollArea.SizeAdjustPolicy.AdjustToContents)
 
-        self.table_layout.addWidget(self.portfolio_table)
+        view.table_layout.addWidget(view.portfolio_table)
 
         # Gráfico
-        self.chart_tab = QWidget()
-        self.chart_layout = QHBoxLayout(self.chart_tab)
+        view.chart_tab = QWidget()
+        view.chart_layout = QHBoxLayout(view.chart_tab)
 
-        self.category_chart_widget = QWidget()
-        self.category_chart_layout = QVBoxLayout(self.category_chart_widget)
+        view.category_chart_widget = QWidget()
+        view.category_chart_layout = QVBoxLayout(view.category_chart_widget)
 
-        self.symbol_chart_widget = QWidget()
-        self.symbol_chart_layout = QVBoxLayout(self.symbol_chart_widget)
-        self.symbol_chart_label = QLabel("Seleccione una categoría para ver detalles")
-        self.symbol_chart_layout.addWidget(self.symbol_chart_label)
+        view.symbol_chart_widget = QWidget()
+        view.symbol_chart_layout = QVBoxLayout(view.symbol_chart_widget)
+        view.symbol_chart_label = QLabel("Seleccione una categoría para ver detalles")
+        view.symbol_chart_layout.addWidget(view.symbol_chart_label)
 
-        self.chart_layout.addWidget(self.category_chart_widget)
-        self.chart_layout.addWidget(self.symbol_chart_widget)
+        view.chart_layout.addWidget(view.category_chart_widget)
+        view.chart_layout.addWidget(view.symbol_chart_widget)
 
         # Añadir pestañas
-        self.portfolio_tabs.addTab(self.table_tab, "Tabla")
-        self.portfolio_tabs.addTab(self.chart_tab, "Gráfico")
+        view.portfolio_tabs.addTab(view.table_tab, "Tabla")
+        view.portfolio_tabs.addTab(view.chart_tab, "Gráfico")
 
         # 1) Marco y layout principal de controles
         control_frame  = QFrame()
@@ -1133,9 +1171,9 @@ class PortfolioAppQt(QMainWindow):
         control_layout.setContentsMargins(0, 0, 0, 0)
 
         # 2) Botón "Actualizar Datos"
-        self.actualizar_btn = QPushButton("Actualizar Datos")
-        self.actualizar_btn.clicked.connect(self.actualizar_datos_mercado)
-        control_layout.addWidget(self.actualizar_btn)
+        view.actualizar_btn = QPushButton("Actualizar Datos")
+        view.actualizar_btn.clicked.connect(self.actualizar_datos_mercado)
+        control_layout.addWidget(view.actualizar_btn)
 
         # 3) Bloque de auto-actualización con QGridLayout
         auto_frame  = QFrame()
@@ -1145,21 +1183,25 @@ class PortfolioAppQt(QMainWindow):
         auto_layout.setVerticalSpacing(0)
 
         #   Fila 0: checkbox ocupando ambas columnas
-        self.auto_update_check = QCheckBox("Actualización Automática")
-        self.auto_update_check.stateChanged.connect(self.toggle_auto_update)
-        auto_layout.addWidget(self.auto_update_check, 0, 0, 1, 2, alignment=Qt.AlignmentFlag.AlignLeft)
+        view.auto_update_check = QCheckBox("Actualización Automática")
+        view.auto_update_check.stateChanged.connect(
+            lambda state, v=view: self.toggle_auto_update(state, v)
+        )
+        auto_layout.addWidget(view.auto_update_check, 0, 0, 1, 2, alignment=Qt.AlignmentFlag.AlignLeft)
 
         #   Fila 1: "Intervalo (min):" + campo de texto
-        self.interval_label = QLabel("Intervalo (min):")
-        self.interval_edit  = QLineEdit(str(self.auto_update_interval))
-        self.interval_edit.setFixedWidth(40)
-        self.interval_edit.textChanged.connect(self.update_interval)
-        auto_layout.addWidget(self.interval_label, 1, 0, alignment=Qt.AlignmentFlag.AlignLeft)
-        auto_layout.addWidget(self.interval_edit,  1, 1, alignment=Qt.AlignmentFlag.AlignLeft)
+        view.interval_label = QLabel("Intervalo (min):")
+        view.interval_edit  = QLineEdit(str(self.auto_update_interval))
+        view.interval_edit.setFixedWidth(40)
+        view.interval_edit.textChanged.connect(
+            lambda text, v=view: self.update_interval(text, v)
+        )
+        auto_layout.addWidget(view.interval_label, 1, 0, alignment=Qt.AlignmentFlag.AlignLeft)
+        auto_layout.addWidget(view.interval_edit,  1, 1, alignment=Qt.AlignmentFlag.AlignLeft)
 
         #   Fila 2: cuenta atrás "Próxima actualización"
-        self.countdown_label = QLabel("Próxima actualización: --:--")
-        auto_layout.addWidget(self.countdown_label, 2, 0, 1, 2, alignment=Qt.AlignmentFlag.AlignLeft)
+        view.countdown_label = QLabel("Próxima actualización: --:--")
+        auto_layout.addWidget(view.countdown_label, 2, 0, 1, 2, alignment=Qt.AlignmentFlag.AlignLeft)
 
         control_layout.addWidget(auto_frame)
 
@@ -1168,19 +1210,21 @@ class PortfolioAppQt(QMainWindow):
         status_group.setSpacing(0)
         status_group.setContentsMargins(0, 0, 0, 0)
 
-        self.status_label = QLabel(
+        view.status_label = QLabel(
             f"Última actualización: {self.last_update if self.last_update else '-'}"
         )
-        status_group.addWidget(self.status_label, alignment=Qt.AlignmentFlag.AlignLeft)
+        status_group.addWidget(view.status_label, alignment=Qt.AlignmentFlag.AlignLeft)
 
         # Filtro de moneda
         filter_layout = QHBoxLayout()
         filter_layout.setSpacing(5)
         filter_layout.addWidget(QLabel("Moneda:"))
-        self.currency_filter_combo = QComboBox()
-        self.currency_filter_combo.addItems(["Todos", "ARS", "USD"])
-        self.currency_filter_combo.currentTextChanged.connect(self.load_portfolio)
-        filter_layout.addWidget(self.currency_filter_combo)
+        view.currency_filter_combo = QComboBox()
+        view.currency_filter_combo.addItems(["Todos", "ARS", "USD"])
+        view.currency_filter_combo.currentTextChanged.connect(
+            lambda _text, v=view: self.load_portfolio(v)
+        )
+        filter_layout.addWidget(view.currency_filter_combo)
         status_group.addLayout(filter_layout)
 
         control_layout.addLayout(status_group)
@@ -1189,18 +1233,25 @@ class PortfolioAppQt(QMainWindow):
         control_layout.addStretch()
 
         # 6) Botón "Actualizar Portafolio"
-        self.update_portfolio_btn = QPushButton("Actualizar Portafolio")
-        self.update_portfolio_btn.clicked.connect(self.load_portfolio)
-        control_layout.addWidget(self.update_portfolio_btn)
+        view.update_portfolio_btn = QPushButton("Actualizar Portafolio")
+        view.update_portfolio_btn.clicked.connect(
+            lambda _checked=False, v=view: self.load_portfolio(v)
+        )
+        control_layout.addWidget(view.update_portfolio_btn)
 
         # 7) Insertar todo en el layout global de la ventana/dialog
         layout.addWidget(control_frame)
 
         # Conectar cambio de pestaña
-        self.portfolio_tabs.currentChanged.connect(self.on_portfolio_tab_changed)
+        view.portfolio_tabs.currentChanged.connect(
+            lambda index, v=view: self.on_portfolio_tab_changed(index, v)
+        )
 
-    def toggle_auto_update(self, state):
+        return view
+
+    def toggle_auto_update(self, state, view):
         self.auto_update_active = (state == Qt.CheckState.Checked.value)
+        self.sync_auto_update_controls(source_view=view)
         if self.auto_update_active:
             self.start_auto_update()
         else:
@@ -1229,11 +1280,12 @@ class PortfolioAppQt(QMainWindow):
         self.default_fx_rate = fx_rate if fx_rate > 0 else 1.0
         return self.default_fx_rate
 
-    def update_interval(self, text):
+    def update_interval(self, text, view):
         try:
             interval = int(text)
             if interval > 0:
                 self.auto_update_interval = interval
+                self.sync_auto_update_controls(source_view=view)
                 if self.auto_update_active:
                     self.start_auto_update()
         except ValueError:
@@ -1257,11 +1309,12 @@ class PortfolioAppQt(QMainWindow):
         """Detener la actualización automática"""
         self.auto_update_timer.stop()
         self.countdown_timer.stop()
-        self.countdown_label.setText("Próxima actualización: --:--")
+        for view in self.get_portfolio_views():
+            view.countdown_label.setText("Próxima actualización: --:--")
 
-    def on_portfolio_tab_changed(self, index):
-        if self.portfolio_tabs.tabText(index) == "Gráfico":
-            self.draw_category_pie_chart()
+    def on_portfolio_tab_changed(self, index, view):
+        if view.portfolio_tabs.tabText(index) == "Gráfico":
+            self.draw_category_pie_chart(view)
 
     def get_cash_by_broker(self, moneda="ARS"):
         balances = {broker: 0.0 for broker in BROKERS}
@@ -1285,9 +1338,12 @@ class PortfolioAppQt(QMainWindow):
             print(f"Error calculando posiciones por broker: {e}")
         return holdings
 
-    def load_portfolio(self):
+    def load_portfolio(self, view=None):
+        if view is None:
+            view = self.user_portfolio_view
+
         # Limpiar tabla
-        self.portfolio_table.setRowCount(0)
+        view.portfolio_table.setRowCount(0)
 
         plazo_fijo_detalles = {}
         descuentos_por_simbolo = {}
@@ -1530,7 +1586,7 @@ class PortfolioAppQt(QMainWindow):
             total_valor_actual_usd += valor_usd
 
         # Aplicar filtro de moneda si corresponde
-        filtro_moneda = getattr(self, "currency_filter_combo", None)
+        filtro_moneda = getattr(view, "currency_filter_combo", None)
         moneda_seleccionada = filtro_moneda.currentText() if filtro_moneda else "Todos"
         if moneda_seleccionada != "Todos":
             portfolio_data = [p for p in portfolio_data if p.get('moneda', 'ARS') == moneda_seleccionada or (p['tipo'] == "Efectivo" and p.get('moneda', 'ARS') == moneda_seleccionada)]
@@ -1568,8 +1624,8 @@ class PortfolioAppQt(QMainWindow):
             categorias[cat].append(item)
 
         # Guardar datos para gráficos
-        self.portfolio_data = portfolio_data
-        self.categorias = categorias
+        view.portfolio_data = portfolio_data
+        view.categorias = categorias
         self.total_valor = total_valor
         self.total_valor_usd = total_valor_usd
 
@@ -1586,20 +1642,20 @@ class PortfolioAppQt(QMainWindow):
             cat_total_ars = sum(item['valor_ars'] for item in items)
 
             # Fila de categoría
-            self.portfolio_table.insertRow(row_idx)
-            self.portfolio_table.setItem(row_idx, 0, QTableWidgetItem(cat))
-            self.portfolio_table.setItem(row_idx, 9, QTableWidgetItem(f"${cat_total_ars:,.2f}"))
+            view.portfolio_table.insertRow(row_idx)
+            view.portfolio_table.setItem(row_idx, 0, QTableWidgetItem(cat))
+            view.portfolio_table.setItem(row_idx, 9, QTableWidgetItem(f"${cat_total_ars:,.2f}"))
 
             if total_valor > 0:
                 cat_porcentaje = (cat_total_ars / total_valor) * 100
-                self.portfolio_table.setItem(row_idx, 11, QTableWidgetItem(f"{cat_porcentaje:.2f}%"))
+                view.portfolio_table.setItem(row_idx, 11, QTableWidgetItem(f"{cat_porcentaje:.2f}%"))
 
             # Estilo fila categoría
             for col in range(13):
-                item = self.portfolio_table.item(row_idx, col)
+                item = view.portfolio_table.item(row_idx, col)
                 if item is None:
                     item = QTableWidgetItem("")
-                    self.portfolio_table.setItem(row_idx, col, item)
+                    view.portfolio_table.setItem(row_idx, col, item)
                 if col == 0:
                     item.setBackground(QColor(self.get_theme_value("table_category_bg", "#e0e0e0")))
                 else:
@@ -1612,7 +1668,7 @@ class PortfolioAppQt(QMainWindow):
 
             # Filas de activos
             for item in items:
-                self.portfolio_table.insertRow(row_idx)
+                view.portfolio_table.insertRow(row_idx)
 
                 valor_actual = item['valor_actual']
                 valor_ars = item.get('valor_ars', valor_actual)
@@ -1639,76 +1695,76 @@ class PortfolioAppQt(QMainWindow):
                     porcentaje_str = "0.00%"
 
                 # Llenar la fila
-                self.portfolio_table.setItem(row_idx, 0, QTableWidgetItem(""))
-                self.portfolio_table.setItem(row_idx, 1, QTableWidgetItem(item['simbolo_display']))
-                self.portfolio_table.setItem(row_idx, 2, QTableWidgetItem(item.get('moneda', 'ARS')))
-                self.portfolio_table.setItem(row_idx, 3, QTableWidgetItem(
+                view.portfolio_table.setItem(row_idx, 0, QTableWidgetItem(""))
+                view.portfolio_table.setItem(row_idx, 1, QTableWidgetItem(item['simbolo_display']))
+                view.portfolio_table.setItem(row_idx, 2, QTableWidgetItem(item.get('moneda', 'ARS')))
+                view.portfolio_table.setItem(row_idx, 3, QTableWidgetItem(
                     f"{item['cantidad']:,.2f}" if item['tipo'] not in ["Efectivo", "Plazo Fijo"] else ""))
-                self.portfolio_table.setItem(row_idx, 4, QTableWidgetItem(variacion_str))
-                self.portfolio_table.setItem(row_idx, 5, QTableWidgetItem(precio_operacion_compra))
-                self.portfolio_table.setItem(row_idx, 6, QTableWidgetItem(valor_operacion_compra))
-                self.portfolio_table.setItem(row_idx, 7, QTableWidgetItem(precio_actual))
-                self.portfolio_table.setItem(row_idx, 8, QTableWidgetItem(valor_actual_str))
-                self.portfolio_table.setItem(row_idx, 9, QTableWidgetItem(f"${valor_ars:,.2f}"))
-                self.portfolio_table.setItem(row_idx, 10, QTableWidgetItem(f"${valor_usd:,.2f}"))
-                self.portfolio_table.setItem(row_idx, 11, QTableWidgetItem(porcentaje_str))
-                self.portfolio_table.setItem(row_idx, 12, QTableWidgetItem(resultado_str))
+                view.portfolio_table.setItem(row_idx, 4, QTableWidgetItem(variacion_str))
+                view.portfolio_table.setItem(row_idx, 5, QTableWidgetItem(precio_operacion_compra))
+                view.portfolio_table.setItem(row_idx, 6, QTableWidgetItem(valor_operacion_compra))
+                view.portfolio_table.setItem(row_idx, 7, QTableWidgetItem(precio_actual))
+                view.portfolio_table.setItem(row_idx, 8, QTableWidgetItem(valor_actual_str))
+                view.portfolio_table.setItem(row_idx, 9, QTableWidgetItem(f"${valor_ars:,.2f}"))
+                view.portfolio_table.setItem(row_idx, 10, QTableWidgetItem(f"${valor_usd:,.2f}"))
+                view.portfolio_table.setItem(row_idx, 11, QTableWidgetItem(porcentaje_str))
+                view.portfolio_table.setItem(row_idx, 12, QTableWidgetItem(resultado_str))
 
                 # Colorear celdas
                 if item['variacion_diaria'] is not None:
                     if item['variacion_diaria'] > 0:
-                        self.portfolio_table.item(row_idx, 4).setForeground(QColor('green'))
+                        view.portfolio_table.item(row_idx, 4).setForeground(QColor('green'))
                     elif item['variacion_diaria'] < 0:
-                        self.portfolio_table.item(row_idx, 4).setForeground(QColor('red'))
+                        view.portfolio_table.item(row_idx, 4).setForeground(QColor('red'))
 
                 if item['diferencia_valor'] > 0:
-                    self.portfolio_table.item(row_idx, 8).setForeground(QColor('green'))
+                    view.portfolio_table.item(row_idx, 8).setForeground(QColor('green'))
                 elif item['diferencia_valor'] < 0:
-                    self.portfolio_table.item(row_idx, 8).setForeground(QColor('red'))
+                    view.portfolio_table.item(row_idx, 8).setForeground(QColor('red'))
 
                 if item['resultado'] > 0:
-                    self.portfolio_table.item(row_idx, 12).setForeground(QColor('green'))
+                    view.portfolio_table.item(row_idx, 12).setForeground(QColor('green'))
                 elif item['resultado'] < 0:
-                    self.portfolio_table.item(row_idx, 12).setForeground(QColor('red'))
+                    view.portfolio_table.item(row_idx, 12).setForeground(QColor('red'))
 
                 row_idx += 1
 
         # Fila total
-        self.portfolio_table.insertRow(row_idx)
-        self.portfolio_table.setItem(row_idx, 0, QTableWidgetItem("TOTAL"))
-        self.portfolio_table.setItem(row_idx, 9, QTableWidgetItem(f"${total_valor_actual:,.2f}"))
-        self.portfolio_table.setItem(row_idx, 10, QTableWidgetItem(f"${total_valor_usd_tabla:,.2f}"))
-        self.portfolio_table.setItem(row_idx, 11, QTableWidgetItem(f"{suma_porcentajes:.2f}%"))
-        self.portfolio_table.setItem(row_idx, 12, QTableWidgetItem(f"${total_resultado:,.2f}"))
+        view.portfolio_table.insertRow(row_idx)
+        view.portfolio_table.setItem(row_idx, 0, QTableWidgetItem("TOTAL"))
+        view.portfolio_table.setItem(row_idx, 9, QTableWidgetItem(f"${total_valor_actual:,.2f}"))
+        view.portfolio_table.setItem(row_idx, 10, QTableWidgetItem(f"${total_valor_usd_tabla:,.2f}"))
+        view.portfolio_table.setItem(row_idx, 11, QTableWidgetItem(f"{suma_porcentajes:.2f}%"))
+        view.portfolio_table.setItem(row_idx, 12, QTableWidgetItem(f"${total_resultado:,.2f}"))
 
         # Estilo fila total
         for col in range(13):
-            item = self.portfolio_table.item(row_idx, col)
+            item = view.portfolio_table.item(row_idx, col)
             if item is None:
                 item = QTableWidgetItem("")
-                self.portfolio_table.setItem(row_idx, col, item)
+                view.portfolio_table.setItem(row_idx, col, item)
             item.setBackground(QColor(self.get_theme_value("table_total_bg", "lightgray")))
             font = item.font()
             font.setBold(True)
             item.setFont(font)
 
         # Actualizar gráficos si es necesario
-        if self.portfolio_tabs.currentIndex() == 1:  # Si está en la pestaña de gráficos
-            self.draw_category_pie_chart()
+        if view.portfolio_tabs.currentIndex() == 1:  # Si está en la pestaña de gráficos
+            self.draw_category_pie_chart(view)
 
-    def draw_category_pie_chart(self):
+    def draw_category_pie_chart(self, view):
         # Limpiar widget anterior
-        for i in reversed(range(self.category_chart_layout.count())):
-            widget = self.category_chart_layout.itemAt(i).widget()
+        for i in reversed(range(view.category_chart_layout.count())):
+            widget = view.category_chart_layout.itemAt(i).widget()
             if widget:
                 widget.setParent(None)
 
-        if not hasattr(self, 'portfolio_data') or not hasattr(self, 'categorias'):
+        if not hasattr(view, 'portfolio_data') or not hasattr(view, 'categorias'):
             return
 
         # Agrupar por categoría y sumar el valor actual
         categorias_dict = {}
-        for item in self.portfolio_data:
+        for item in view.portfolio_data:
             cat = item['tipo']
             if cat not in categorias_dict:
                 categorias_dict[cat] = 0.0
@@ -1725,7 +1781,7 @@ class PortfolioAppQt(QMainWindow):
         # Si no hay valores positivos, no dibujamos
         if not valores:
             no_data_label = QLabel("No hay datos suficientes para mostrar el gráfico")
-            self.category_chart_layout.addWidget(no_data_label)
+            view.category_chart_layout.addWidget(no_data_label)
             return
 
         # Crear figura de matplotlib
@@ -1750,10 +1806,10 @@ class PortfolioAppQt(QMainWindow):
 
         # Canvas para mostrar la figura
         canvas = FigureCanvasQTAgg(fig)
-        self.category_chart_layout.addWidget(canvas)
+        view.category_chart_layout.addWidget(canvas)
 
         # Guardar referencia para eventos
-        self.pie_chart_elements = {
+        view.pie_chart_elements = {
             'wedges': wedges,
             'texts': texts,
             'autotexts': autotexts,
@@ -1766,45 +1822,45 @@ class PortfolioAppQt(QMainWindow):
             wedge.set_picker(True)  # Permitir selección
 
         # Conectar evento de clic
-        canvas.mpl_connect('pick_event', self.on_pie_click)
+        canvas.mpl_connect('pick_event', lambda event, v=view: self.on_pie_click(event, v))
 
         # Guardar referencia para eventos
-        self.pie_chart = {
+        view.pie_chart = {
             'canvas': canvas,
             'wedges': wedges,
             'categories': cats
         }
 
-    def on_pie_click(self, event):
+    def on_pie_click(self, event, view):
         wedge = event.artist
-        cat_idx = self.pie_chart['wedges'].index(wedge)
-        category = self.pie_chart['categories'][cat_idx]
-        self.draw_symbols_pie_chart(category)
+        cat_idx = view.pie_chart['wedges'].index(wedge)
+        category = view.pie_chart['categories'][cat_idx]
+        self.draw_symbols_pie_chart(category, view)
 
-    def on_category_click(self, event):
+    def on_category_click(self, event, view):
         if isinstance(event.artist, plt.Text):
             label_text = event.artist.get_text()
-            if label_text in self.pie_chart_elements['categories']:
-                idx = self.pie_chart_elements['categories'].index(label_text)
+            if label_text in view.pie_chart_elements['categories']:
+                idx = view.pie_chart_elements['categories'].index(label_text)
             else:
                 return
         else:
-            idx = self.pie_chart_elements['wedges'].index(event.artist)
+            idx = view.pie_chart_elements['wedges'].index(event.artist)
 
-        category = self.pie_chart_elements['categories'][idx]
-        self.draw_symbols_pie_chart(category)
+        category = view.pie_chart_elements['categories'][idx]
+        self.draw_symbols_pie_chart(category, view)
 
-    def draw_symbols_pie_chart(self, category):
+    def draw_symbols_pie_chart(self, category, view):
         # Limpiar widget anterior
-        for i in reversed(range(self.symbol_chart_layout.count())):
-            widget = self.symbol_chart_layout.itemAt(i).widget()
+        for i in reversed(range(view.symbol_chart_layout.count())):
+            widget = view.symbol_chart_layout.itemAt(i).widget()
             if widget:
                 widget.deleteLater()
 
         # Filtrar los símbolos de esta categoría con valor actual positivo
         symbols = []
         values = []
-        for item in self.portfolio_data:
+        for item in view.portfolio_data:
             if item['tipo'] == category and item['valor_actual'] > 0:
                 symbols.append(item['simbolo_display'])
                 values.append(item['valor_actual'])
@@ -1812,7 +1868,7 @@ class PortfolioAppQt(QMainWindow):
         # Si no hay símbolos, mostrar mensaje
         if not values:
             label = QLabel(f"No hay activos en {category}")
-            self.symbol_chart_layout.addWidget(label)
+            view.symbol_chart_layout.addWidget(label)
             return
 
         # Crear figura de matplotlib
@@ -1837,7 +1893,7 @@ class PortfolioAppQt(QMainWindow):
 
         # Canvas para mostrar la figura
         canvas = FigureCanvasQTAgg(fig)
-        self.symbol_chart_layout.addWidget(canvas)
+        view.symbol_chart_layout.addWidget(canvas)
 
     def create_journal_view(self, parent_widget):
         layout = QVBoxLayout(parent_widget)
@@ -1925,7 +1981,7 @@ class PortfolioAppQt(QMainWindow):
             self.load_compras_pendientes()
             self.recalcular_portfolio()
             self.load_journal()
-            self.load_portfolio()
+            self.refresh_portfolios()
             self.load_finished_operations()
 
             # Actualizar pestaña de Análisis
