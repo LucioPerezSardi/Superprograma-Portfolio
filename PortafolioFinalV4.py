@@ -364,6 +364,14 @@ class PortfolioAppQt(QMainWindow):
         if visible:
             self.draw_liquidity_chart(view)
 
+    def set_user_grouping(self, grouping, view):
+        if not getattr(view, "is_user", False):
+            return
+        view.group_by = grouping
+        view.group_by_tipo_btn.setChecked(grouping == "tipo")
+        view.group_by_broker_btn.setChecked(grouping == "broker")
+        self.load_portfolio(view)
+
     def set_liquidity_currency(self, currency, view):
         if not getattr(view, "is_user", False):
             return
@@ -1441,6 +1449,25 @@ class PortfolioAppQt(QMainWindow):
             lambda _text, v=view: self.load_portfolio(v)
         )
         filter_layout.addWidget(view.currency_filter_combo)
+        if is_user:
+            group_layout = QHBoxLayout()
+            group_layout.setSpacing(6)
+            group_layout.addWidget(QLabel("Agrupar:"))
+            view.group_by = "tipo"
+            view.group_by_tipo_btn = QPushButton("Instrumento")
+            view.group_by_tipo_btn.setCheckable(True)
+            view.group_by_tipo_btn.setChecked(True)
+            view.group_by_tipo_btn.clicked.connect(
+                lambda _checked=False, v=view: self.set_user_grouping("tipo", v)
+            )
+            view.group_by_broker_btn = QPushButton("Broker")
+            view.group_by_broker_btn.setCheckable(True)
+            view.group_by_broker_btn.clicked.connect(
+                lambda _checked=False, v=view: self.set_user_grouping("broker", v)
+            )
+            group_layout.addWidget(view.group_by_tipo_btn)
+            group_layout.addWidget(view.group_by_broker_btn)
+            filter_layout.addLayout(group_layout)
         status_group.addLayout(filter_layout)
 
         control_layout.addLayout(status_group)
@@ -1837,16 +1864,19 @@ class PortfolioAppQt(QMainWindow):
 
         # Orden de categorías
         if getattr(view, "is_user", False):
-            orden_categorias = {
-                "Plazo Fijo": 1,
-                "FCI": 2,
-                "Bonos AR": 3,
-                "Acciones AR": 4,
-                "CEDEARs": 5,
-                "ETFs": 6,
-                "Criptomonedas": 7,
-                "Cauciones": 8
-            }
+            if getattr(view, "group_by", "tipo") == "broker":
+                orden_categorias = {}
+            else:
+                orden_categorias = {
+                    "Plazo Fijo": 1,
+                    "FCI": 2,
+                    "Bonos AR": 3,
+                    "Acciones AR": 4,
+                    "CEDEARs": 5,
+                    "ETFs": 6,
+                    "Criptomonedas": 7,
+                    "Cauciones": 8
+                }
         else:
             orden_categorias = {
                 "Liquidez Actual": 0,
@@ -1861,11 +1891,15 @@ class PortfolioAppQt(QMainWindow):
             }
 
         categorias = {}
+        group_by = getattr(view, "group_by", "tipo")
         for item in table_data:
-            cat = item['tipo']
-            # Renombrar efectivo a Liquidez Actual
-            if not getattr(view, "is_user", False) and cat in ["Efectivo", "Efectivo Líquido"]:
-                cat = "Liquidez Actual"
+            if getattr(view, "is_user", False) and group_by == "broker":
+                cat = item.get("broker", "Sin broker")
+            else:
+                cat = item['tipo']
+                # Renombrar efectivo a Liquidez Actual
+                if not getattr(view, "is_user", False) and cat in ["Efectivo", "Efectivo Líquido"]:
+                    cat = "Liquidez Actual"
             if cat not in categorias:
                 categorias[cat] = []
             categorias[cat].append(item)
@@ -1887,6 +1921,8 @@ class PortfolioAppQt(QMainWindow):
         for cat in sorted(categorias.keys(), key=lambda x: orden_categorias.get(x, 10)):
             items = categorias[cat]
             cat_total_ars = sum(item['valor_ars'] for item in items)
+            cat_total_compra = sum(item.get('valor_compra', 0) for item in items)
+            cat_total_resultado = sum(item.get('resultado', 0) for item in items)
 
             # Fila de categoría
             view.portfolio_table.insertRow(row_idx)
@@ -1896,6 +1932,13 @@ class PortfolioAppQt(QMainWindow):
             if total_valor > 0:
                 cat_porcentaje = (cat_total_ars / total_valor) * 100
                 view.portfolio_table.setItem(row_idx, 11, QTableWidgetItem(f"{cat_porcentaje:.2f}%"))
+            if getattr(view, "is_user", False):
+                if cat_total_compra > 0:
+                    cat_rend_pct = (cat_total_resultado / cat_total_compra) * 100
+                else:
+                    cat_rend_pct = 0
+                cat_resultado_str = f"${cat_total_resultado:,.2f} ({cat_rend_pct:.2f}%)"
+                view.portfolio_table.setItem(row_idx, 12, QTableWidgetItem(cat_resultado_str))
 
             # Estilo fila categoría
             for col in range(13):
