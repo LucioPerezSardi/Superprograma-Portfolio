@@ -30,7 +30,7 @@ from PyQt6.QtWidgets import (
     QButtonGroup, QGroupBox, QAbstractScrollArea, QSizePolicy, QSplitter,
     QStyleFactory, QCheckBox, QDateEdit, QListWidget, QListWidgetItem
 )
-from PyQt6.QtCore import Qt, QSize, QUrl, QTimer, QDate
+from PyQt6.QtCore import Qt, QSize, QUrl, QTimer, QDate, QEvent
 from PyQt6.QtGui import QColor, QFont, QBrush, QIcon, QPixmap
 from PyQt6.QtWebEngineWidgets import QWebEngineView
 from PyQt6.QtWebEngineCore import QWebEngineSettings
@@ -1047,10 +1047,12 @@ class PortfolioAppQt(QMainWindow):
     def toggle_liquidity_chart(self, view):
         if not getattr(view, "is_user", False):
             return
-        visible = not view.liquidity_chart_frame.isVisible()
-        view.liquidity_chart_frame.setVisible(visible)
-        if visible:
-            self.draw_liquidity_chart(view)
+        if getattr(view, "liquidity_overlay", None) is None:
+            return
+        if view.liquidity_overlay.isVisible():
+            self.close_liquidity_overlay(view)
+        else:
+            self.open_liquidity_overlay(view)
 
     def set_user_grouping(self, grouping, view):
         if not getattr(view, "is_user", False):
@@ -1072,18 +1074,27 @@ class PortfolioAppQt(QMainWindow):
         if not getattr(view, "is_user", False):
             return
         view.liquidity_currency = currency
-        if view.liquidity_chart_frame.isVisible():
-            self.draw_liquidity_chart(view)
+        if getattr(view, "liquidity_overlay", None) is not None:
+            self.open_liquidity_overlay(view, currency)
 
     def draw_liquidity_chart(self, view):
-        for i in reversed(range(view.liquidity_chart_layout.count())):
-            widget = view.liquidity_chart_layout.itemAt(i).widget()
+        self.draw_liquidity_chart_for_currency(
+            view,
+            view.liquidity_currency,
+            view.liquidity_chart_layout,
+            view.liquidity_list,
+            view.liquidity_total_label,
+        )
+
+    def draw_liquidity_chart_for_currency(self, view, currency, chart_layout, list_widget, total_label=None):
+        for i in reversed(range(chart_layout.count())):
+            widget = chart_layout.itemAt(i).widget()
             if widget:
                 widget.setParent(None)
-        view.liquidity_list.clear()
+        list_widget.clear()
 
         liquidity_by_broker = getattr(view, "liquidity_by_broker", {})
-        data = liquidity_by_broker.get(view.liquidity_currency, {})
+        data = liquidity_by_broker.get(currency, {})
         labels = []
         values = []
         for broker, amount in data.items():
@@ -1093,7 +1104,9 @@ class PortfolioAppQt(QMainWindow):
 
         if not values:
             no_data_label = QLabel("No hay liquidez para mostrar")
-            view.liquidity_chart_layout.addWidget(no_data_label)
+            chart_layout.addWidget(no_data_label)
+            if total_label is not None:
+                total_label.setText("")
             return
 
         fig = Figure(figsize=(5, 3.2), dpi=100)
@@ -1116,7 +1129,7 @@ class PortfolioAppQt(QMainWindow):
             textprops={'fontsize': 9, 'color': chart_text}
         )
         ax.set_title(
-            f'Distribución de liquidez en {view.liquidity_currency}',
+            f'Distribución de liquidez en {currency}',
             fontsize=12,
             pad=14,
             color=chart_text,
@@ -1126,10 +1139,10 @@ class PortfolioAppQt(QMainWindow):
 
         canvas = FigureCanvasQTAgg(fig)
         canvas.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
-        view.liquidity_chart_layout.addWidget(canvas)
+        chart_layout.addWidget(canvas)
 
         total = sum(values) if values else 1
-        currency_prefix = "USD" if view.liquidity_currency == "USD" else "ARS"
+        currency_prefix = "USD" if currency == "USD" else "ARS"
         for broker, amount in sorted(data.items(), key=lambda x: x[0]):
             if abs(amount) <= 0.0001:
                 continue
@@ -1139,7 +1152,25 @@ class PortfolioAppQt(QMainWindow):
             pixmap = QPixmap(10, 10)
             pixmap.fill(QColor(self.get_broker_color(broker)))
             item.setIcon(QIcon(pixmap))
-            view.liquidity_list.addItem(item)
+            list_widget.addItem(item)
+
+        if total_label is not None:
+            total_assets_ars = getattr(view, "total_assets_ars", 0.0)
+            total_liq_ars = sum(liquidity_by_broker.get("ARS", {}).values())
+            total_liq_usd = sum(liquidity_by_broker.get("USD", {}).values())
+            fx_rate = self.detect_fx_rate()
+            total_portfolio_ars = total_assets_ars + total_liq_ars + (total_liq_usd * fx_rate if fx_rate else 0.0)
+            if currency == "USD":
+                total_equiv_ars = total * (fx_rate if fx_rate else 0.0)
+            else:
+                total_equiv_ars = total
+            if total_portfolio_ars > 0:
+                pct_total = (total_equiv_ars / total_portfolio_ars) * 100
+            else:
+                pct_total = 0.0
+            total_label.setText(
+                f"Total {currency_prefix}: ${total:,.2f} ({pct_total:.2f}%)"
+            )
 
         tooltip = ax.annotate(
             "",
@@ -1173,6 +1204,35 @@ class PortfolioAppQt(QMainWindow):
 
         canvas.mpl_connect("motion_notify_event", on_move)
 
+    def open_liquidity_overlay(self, view, currency=None):
+        if getattr(view, "liquidity_overlay", None) is None:
+            return
+        view.liquidity_overlay.setGeometry(view.overlay_parent.rect())
+        view.liquidity_overlay.raise_()
+        view.liquidity_overlay.setVisible(True)
+        self.draw_liquidity_chart_for_currency(
+            view,
+            "ARS",
+            view.liquidity_overlay_charts["ARS"],
+            view.liquidity_overlay_lists["ARS"],
+            view.liquidity_overlay_totals["ARS"],
+        )
+        self.draw_liquidity_chart_for_currency(
+            view,
+            "USD",
+            view.liquidity_overlay_charts["USD"],
+            view.liquidity_overlay_lists["USD"],
+            view.liquidity_overlay_totals["USD"],
+        )
+        if currency in ("ARS", "USD"):
+            index = 0 if currency == "ARS" else 1
+            view.liquidity_overlay_tabs.setCurrentIndex(index)
+
+    def close_liquidity_overlay(self, view):
+        if getattr(view, "liquidity_overlay", None) is None:
+            return
+        view.liquidity_overlay.setVisible(False)
+
     def update_liquidity_section(self, view, total_assets_ars, fx_rate):
         liquidity_by_broker = getattr(view, "liquidity_by_broker", {})
         total_liq_ars = sum(liquidity_by_broker.get("ARS", {}).values())
@@ -1198,6 +1258,8 @@ class PortfolioAppQt(QMainWindow):
         view.total_assets_ars = total_assets_ars
         view.total_liq_ars_equiv = total_liq_ars_equiv
         view.total_portfolio_ars = total_portfolio_ars
+        if getattr(view, "liquidity_overlay", None) is not None and view.liquidity_overlay.isVisible():
+            self.open_liquidity_overlay(view)
 
     def update_countdown(self):
         """Actualizar la cuenta regresiva visual"""
@@ -2180,6 +2242,95 @@ class PortfolioAppQt(QMainWindow):
 
             layout.addWidget(view.liquidity_frame)
 
+            view.overlay_parent = parent_widget
+            parent_widget.installEventFilter(self)
+
+            view.liquidity_overlay = QFrame(parent_widget)
+            view.liquidity_overlay.setObjectName("liquidityOverlay")
+            view.liquidity_overlay.setStyleSheet(
+                "QFrame#liquidityOverlay { background: rgba(0, 0, 0, 160); }"
+            )
+            view.liquidity_overlay.setVisible(False)
+
+            overlay_layout = QVBoxLayout(view.liquidity_overlay)
+            overlay_layout.setContentsMargins(40, 30, 40, 30)
+            overlay_layout.addStretch()
+
+            view.liquidity_overlay_card = QFrame()
+            view.liquidity_overlay_card.setObjectName("liquidityOverlayCard")
+            card_bg = self.get_theme_value("card_bg", "#1b1f24")
+            card_border = self.get_theme_value("card_border", "#2f3742")
+            view.liquidity_overlay_card.setStyleSheet(
+                f"QFrame#liquidityOverlayCard {{ background: {card_bg}; border: 1px solid {card_border}; border-radius: 10px; }}"
+            )
+            view.liquidity_overlay_card.setMinimumHeight(420)
+            view.liquidity_overlay_card.setMaximumWidth(1100)
+            overlay_layout.addWidget(view.liquidity_overlay_card, alignment=Qt.AlignmentFlag.AlignCenter)
+            overlay_layout.addStretch()
+
+            card_layout = QVBoxLayout(view.liquidity_overlay_card)
+            card_layout.setContentsMargins(16, 12, 16, 16)
+            card_layout.setSpacing(10)
+
+            overlay_header = QHBoxLayout()
+            overlay_title = QLabel("Liquidez")
+            overlay_title.setStyleSheet("font-weight: 600;")
+            overlay_header.addWidget(overlay_title)
+            overlay_header.addStretch()
+            view.liquidity_overlay_close = QPushButton("X")
+            view.liquidity_overlay_close.setFixedSize(26, 26)
+            view.liquidity_overlay_close.clicked.connect(
+                lambda _checked=False, v=view: self.close_liquidity_overlay(v)
+            )
+            overlay_header.addWidget(view.liquidity_overlay_close)
+            card_layout.addLayout(overlay_header)
+
+            view.liquidity_overlay_tabs = QTabWidget()
+            view.liquidity_overlay_charts = {}
+            view.liquidity_overlay_lists = {}
+            view.liquidity_overlay_totals = {}
+            for currency in ("ARS", "USD"):
+                tab = QWidget()
+                tab_layout = QVBoxLayout(tab)
+                tab_layout.setContentsMargins(0, 0, 0, 0)
+                tab_layout.setSpacing(8)
+
+                chart_list_layout = QHBoxLayout()
+                chart_list_layout.setSpacing(20)
+
+                chart_container = QFrame()
+                chart_layout = QVBoxLayout(chart_container)
+                chart_container.setSizePolicy(
+                    QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding
+                )
+                chart_list_layout.addWidget(chart_container, 3)
+
+                list_container = QFrame()
+                list_container.setStyleSheet("QFrame { background: transparent; border: none; }")
+                list_layout = QVBoxLayout(list_container)
+                list_layout.setContentsMargins(0, 0, 0, 0)
+                list_widget = QListWidget()
+                list_widget.setFrameShape(QFrame.Shape.NoFrame)
+                list_widget.setSpacing(6)
+                list_widget.setStyleSheet(
+                    "QListWidget { background: transparent; }"
+                    "QListWidget::item { padding: 4px 2px; }"
+                )
+                list_layout.addWidget(list_widget)
+                list_container.setMinimumWidth(260)
+                chart_list_layout.addWidget(list_container, 1)
+
+                tab_layout.addLayout(chart_list_layout)
+                total_label = QLabel("")
+                tab_layout.addWidget(total_label)
+
+                view.liquidity_overlay_charts[currency] = chart_layout
+                view.liquidity_overlay_lists[currency] = list_widget
+                view.liquidity_overlay_totals[currency] = total_label
+                view.liquidity_overlay_tabs.addTab(tab, currency)
+
+            card_layout.addWidget(view.liquidity_overlay_tabs)
+
         # Crear pestañas internas
         view.portfolio_tabs = QTabWidget()
         layout.addWidget(view.portfolio_tabs)
@@ -2348,6 +2499,13 @@ class PortfolioAppQt(QMainWindow):
             self.start_auto_update()
         else:
             self.stop_auto_update()
+
+    def eventFilter(self, obj, event):
+        if event.type() == QEvent.Type.Resize:
+            for view in self.get_portfolio_views():
+                if getattr(view, "overlay_parent", None) is obj and hasattr(view, "liquidity_overlay"):
+                    view.liquidity_overlay.setGeometry(obj.rect())
+        return super().eventFilter(obj, event)
 
     def detect_fx_rate(self):
         """Intenta obtener un tipo de cambio MEP desde los datos de mercado usando AL30/AL30D"""
