@@ -920,6 +920,7 @@ class PortfolioAppQt(QMainWindow):
         card_text = self.get_theme_value("card_text", "#e6e6e6")
         gain_color = self.get_theme_value("gain_color", "#25c26e")
         loss_color = self.get_theme_value("loss_color", "#ff5f5f")
+        accent = self.get_theme_value("accent_color", "#3b82f6")
         view.summary_frame.setStyleSheet(
             f"QFrame#portfolioSummary {{ background: {card_bg}; border: 1px solid {card_border}; border-radius: 8px; }}"
         )
@@ -939,6 +940,16 @@ class PortfolioAppQt(QMainWindow):
             view.summary_usd_label.setToolTip(debug)
         view.summary_ars_label.setStyleSheet(f"color: {ars_color}; font-weight: 600;")
         view.summary_usd_label.setStyleSheet(f"color: {usd_color}; font-weight: 600;")
+
+        selected = getattr(view, "asset_currency_view", "ARS")
+        ars_border = accent if selected == "ARS" else card_border
+        usd_border = accent if selected == "USD" else card_border
+        view.summary_ars_card.setStyleSheet(
+            f"QFrame {{ background: {card_bg}; border: 1px solid {ars_border}; border-radius: 8px; }}"
+        )
+        view.summary_usd_card.setStyleSheet(
+            f"QFrame {{ background: {card_bg}; border: 1px solid {usd_border}; border-radius: 8px; }}"
+        )
 
     def configure_user_portfolio_headers(self):
         view = self.user_portfolio_view
@@ -965,13 +976,36 @@ class PortfolioAppQt(QMainWindow):
         if header_ppc:
             header_ppc.setToolTip("PRECIO PROMEDIO DE COMPRA")
 
+    def update_asset_view_headers(self, view):
+        currency = getattr(view, "asset_currency_view", "ARS")
+        if currency not in ("ARS", "USD"):
+            currency = "ARS"
+        header_map = {
+            5: f"PPC ({currency})",
+            6: f"Capital Total Invertido ({currency})",
+            7: f"Precio\nÚltimo Operado ({currency})",
+            8: f"Valor\nActual ({currency})",
+            11: f"% del\nPortafolio ({currency})",
+            12: "Resultado ARS (%)",
+            13: "Resultado USD (%)",
+        }
+        for col, text in header_map.items():
+            item = view.portfolio_table.horizontalHeaderItem(col)
+            if item:
+                item.setText(text)
+
     def apply_currency_column_visibility(self, view):
-        currency = "Todos"
-        combo = getattr(view, "currency_filter_combo", None)
-        if combo is not None:
-            currency = combo.currentText()
-        show_ars = currency in ("Todos", "ARS")
-        show_usd = currency in ("Todos", "USD")
+        if not getattr(view, "is_user", False):
+            for col in [9, 10, 11, 12, 13, 14, 15]:
+                if col < view.portfolio_table.columnCount():
+                    view.portfolio_table.setColumnHidden(col, False)
+            return
+        currency = getattr(view, "asset_currency_view", "ARS")
+        show_ars = currency == "ARS"
+        show_usd = currency == "USD"
+        if currency not in ("ARS", "USD"):
+            show_ars = True
+            show_usd = True
 
         ars_columns = [9, 11, 12, 14]
         usd_columns = [10, 13, 15]
@@ -981,12 +1015,7 @@ class PortfolioAppQt(QMainWindow):
         for col in usd_columns:
             if col < view.portfolio_table.columnCount():
                 view.portfolio_table.setColumnHidden(col, not show_usd)
-
-        if getattr(view, "is_user", False):
-            if hasattr(view, "summary_ars_label"):
-                view.summary_ars_label.setVisible(show_ars)
-            if hasattr(view, "summary_usd_label"):
-                view.summary_usd_label.setVisible(show_usd)
+        self.update_asset_view_headers(view)
 
     def adjust_portfolio_table(self, view):
         header = view.portfolio_table.horizontalHeader()
@@ -1029,6 +1058,14 @@ class PortfolioAppQt(QMainWindow):
         view.group_by = grouping
         view.group_by_tipo_btn.setChecked(grouping == "tipo")
         view.group_by_broker_btn.setChecked(grouping == "broker")
+        self.load_portfolio(view)
+
+    def set_asset_currency_view(self, currency, view):
+        if not getattr(view, "is_user", False):
+            return
+        if currency not in ("ARS", "USD"):
+            return
+        view.asset_currency_view = currency
         self.load_portfolio(view)
 
     def set_liquidity_currency(self, currency, view):
@@ -2038,6 +2075,7 @@ class PortfolioAppQt(QMainWindow):
         view.layout = layout
 
         if is_user:
+            view.asset_currency_view = "ARS"
             view.summary_frame = QFrame()
             view.summary_frame.setObjectName("portfolioSummary")
             summary_layout = QHBoxLayout(view.summary_frame)
@@ -2050,10 +2088,28 @@ class PortfolioAppQt(QMainWindow):
 
             summary_layout.addStretch()
 
+            view.summary_ars_card = QFrame()
+            view.summary_ars_card.setCursor(Qt.CursorShape.PointingHandCursor)
+            view.summary_ars_card.mousePressEvent = (
+                lambda _event, v=view: self.set_asset_currency_view("ARS", v)
+            )
+            ars_layout = QVBoxLayout(view.summary_ars_card)
+            ars_layout.setContentsMargins(12, 6, 12, 6)
             view.summary_ars_label = QLabel("ARS: $0.00")
+            ars_layout.addWidget(view.summary_ars_label)
+
+            view.summary_usd_card = QFrame()
+            view.summary_usd_card.setCursor(Qt.CursorShape.PointingHandCursor)
+            view.summary_usd_card.mousePressEvent = (
+                lambda _event, v=view: self.set_asset_currency_view("USD", v)
+            )
+            usd_layout = QVBoxLayout(view.summary_usd_card)
+            usd_layout.setContentsMargins(12, 6, 12, 6)
             view.summary_usd_label = QLabel("USD: $0.00")
-            summary_layout.addWidget(view.summary_ars_label)
-            summary_layout.addWidget(view.summary_usd_label)
+            usd_layout.addWidget(view.summary_usd_label)
+
+            summary_layout.addWidget(view.summary_ars_card)
+            summary_layout.addWidget(view.summary_usd_card)
 
             layout.addWidget(view.summary_frame)
 
@@ -2536,6 +2592,10 @@ class PortfolioAppQt(QMainWindow):
         except Exception as e:
             print(f"Error leyendo precios cripto: {e}")
 
+        display_currency = "ARS"
+        if getattr(view, "is_user", False):
+            display_currency = getattr(view, "asset_currency_view", "ARS")
+
         # Calcular los valores para cada activo
         total_valor_ars = 0.0
         total_valor_usd = 0.0
@@ -2668,19 +2728,32 @@ class PortfolioAppQt(QMainWindow):
             item['resultado'] = item['diferencia_valor'] - item['descuentos'] + item['rendimientos']
 
             # Acumular valor actual para calcular el total
-            # Valores convertidos
+            # Valores convertidos por tipo de activo
+            tc_actual = self.get_fx_rate_for_date(datetime.now(), item.get("tipo", "")) or fx_rate
+            if tc_actual <= 0:
+                tc_actual = fx_rate
+            simbolo = item.get("simbolo", "")
+            tc_compra = fx_rate
+            if simbolo in tc_weighted_by_symbol and tc_weighted_amount.get(simbolo, 0) > 0:
+                tc_compra = tc_weighted_by_symbol[simbolo] / tc_weighted_amount[simbolo]
+            if tc_compra <= 0:
+                tc_compra = fx_rate
+
+            item["tc_compra"] = tc_compra
+            item["tc_actual"] = tc_actual
+
             if item['tipo'] == "Efectivo":
                 valor_ars = self._safe_number(item.get('monto_ars', 0.0), 0.0)
                 valor_usd = self._safe_number(item.get('monto_usd', 0.0), 0.0)
             else:
                 if moneda_item == "USD":
-                    valor_ars = self._safe_number(item['valor_actual'], 0.0) * fx_rate
+                    valor_ars = self._safe_number(item['valor_actual'], 0.0) * tc_actual
                     valor_usd = self._safe_number(item['valor_actual'], 0.0)
                 else:
                     valor_ars = self._safe_number(item['valor_actual'], 0.0)
                     valor_usd = (
-                        self._safe_number(item['valor_actual'], 0.0) / fx_rate
-                        if fx_rate
+                        self._safe_number(item['valor_actual'], 0.0) / tc_actual
+                        if tc_actual
                         else self._safe_number(item['valor_actual'], 0.0)
                     )
             item['valor_ars'] = valor_ars
@@ -2716,9 +2789,9 @@ class PortfolioAppQt(QMainWindow):
                 tipo_valores[p['tipo']] = tipo_valores.get(p['tipo'], 0) + p.get('valor_ars', 0)
             total_valor_ars = sum(p.get('valor_ars', 0) for p in table_data)
             total_valor_usd = sum(p.get('valor_usd', 0) for p in table_data)
-            total_valor = total_valor_ars
+            total_valor = total_valor_usd if display_currency == "USD" else total_valor_ars
         else:
-            total_valor = total_valor_ars
+            total_valor = total_valor_usd if display_currency == "USD" else total_valor_ars
 
         if getattr(view, "is_user", False) and getattr(view, "group_by", "tipo") == "tipo":
             grouped = {}
@@ -2776,7 +2849,7 @@ class PortfolioAppQt(QMainWindow):
                 tipo_valores[p['tipo']] = tipo_valores.get(p['tipo'], 0) + p.get('valor_ars', 0)
             total_valor_ars = sum(p.get('valor_ars', 0) for p in table_data)
             total_valor_usd = sum(p.get('valor_usd', 0) for p in table_data)
-            total_valor = total_valor_ars
+            total_valor = total_valor_usd if display_currency == "USD" else total_valor_ars
 
         if getattr(view, "is_user", False):
             self.update_liquidity_section(view, total_assets_ars, fx_rate)
@@ -2907,7 +2980,9 @@ class PortfolioAppQt(QMainWindow):
         for cat in sorted(categorias.keys(), key=lambda x: orden_categorias.get(x, 10)):
             items = categorias[cat]
             cat_total_ars = sum(item['valor_ars'] for item in items)
-            cat_total_compra = sum(item.get('valor_compra', 0) for item in items)
+            cat_total_usd = sum(item['valor_usd'] for item in items)
+            cat_total_compra_ars = 0.0
+            cat_total_compra_usd = 0.0
             cat_total_resultado = 0.0
             cat_total_resultado_usd = 0.0
             for item in items:
@@ -2915,49 +2990,56 @@ class PortfolioAppQt(QMainWindow):
                     continue
                 moneda_item = item.get("moneda", "ARS")
                 simbolo = item.get("simbolo", "")
-                tc_compra = fx_rate
-                if simbolo in tc_weighted_by_symbol and tc_weighted_amount.get(simbolo, 0) > 0:
-                    tc_compra = tc_weighted_by_symbol[simbolo] / tc_weighted_amount[simbolo]
+                tc_compra = item.get("tc_compra", fx_rate) or fx_rate
                 if tc_compra <= 0:
                     tc_compra = fx_rate
-                tc_actual = self.get_fx_rate_for_date(datetime.now(), item.get("tipo", "")) or fx_rate
+                tc_actual = item.get("tc_actual", fx_rate) or fx_rate
                 valor_compra = self._safe_number(item.get("valor_compra", 0.0), 0.0)
                 valor_actual = self._safe_number(item.get("valor_actual", 0.0), 0.0)
                 if moneda_item == "USD":
-                    resultado_ars = (valor_actual * tc_actual) - (valor_compra * tc_compra)
-                    resultado_usd = valor_actual - valor_compra
+                    valor_compra_ars = valor_compra * tc_compra
+                    valor_actual_ars = valor_actual * tc_actual
+                    valor_compra_usd = valor_compra
+                    valor_actual_usd = valor_actual
                 else:
-                    resultado_ars = valor_actual - valor_compra
-                    resultado_usd = (valor_actual / tc_actual) - (valor_compra / tc_compra) if tc_actual and tc_compra else 0.0
-                cat_total_resultado += resultado_ars
-                cat_total_resultado_usd += resultado_usd
+                    valor_compra_ars = valor_compra
+                    valor_actual_ars = valor_actual
+                    valor_compra_usd = (valor_compra / tc_compra) if tc_compra else 0.0
+                    valor_actual_usd = (valor_actual / tc_actual) if tc_actual else 0.0
+                cat_total_compra_ars += valor_compra_ars
+                cat_total_compra_usd += valor_compra_usd
+                cat_total_resultado += (valor_actual_ars - valor_compra_ars)
+                cat_total_resultado_usd += (valor_actual_usd - valor_compra_usd)
 
             # Fila de categoría
             view.portfolio_table.insertRow(row_idx)
             view.portfolio_table.setItem(row_idx, 0, QTableWidgetItem(cat))
             view.portfolio_table.setItem(row_idx, 9, QTableWidgetItem(f"${cat_total_ars:,.2f}"))
+            view.portfolio_table.setItem(row_idx, 10, QTableWidgetItem(f"${cat_total_usd:,.2f}"))
 
             if total_valor > 0:
-                cat_porcentaje = (cat_total_ars / total_valor) * 100
+                cat_total_view = cat_total_usd if display_currency == "USD" else cat_total_ars
+                cat_porcentaje = (cat_total_view / total_valor) * 100
                 view.portfolio_table.setItem(row_idx, 11, QTableWidgetItem(f"{cat_porcentaje:.2f}%"))
             if getattr(view, "is_user", False):
-                if cat_total_compra > 0:
-                    cat_rend_pct = (cat_total_resultado / cat_total_compra) * 100
+                if cat_total_compra_ars > 0:
+                    cat_rend_pct_ars = (cat_total_resultado / cat_total_compra_ars) * 100
                 else:
-                    cat_rend_pct = 0
-                cat_resultado_str = f"${cat_total_resultado:,.2f} ({cat_rend_pct:.2f}%)"
+                    cat_rend_pct_ars = 0
+                if cat_total_compra_usd > 0:
+                    cat_rend_pct_usd = (cat_total_resultado_usd / cat_total_compra_usd) * 100
+                else:
+                    cat_rend_pct_usd = 0
+                cat_resultado_str = f"${cat_total_resultado:,.2f} ({cat_rend_pct_ars:.2f}%)"
                 view.portfolio_table.setItem(row_idx, 12, QTableWidgetItem(cat_resultado_str))
-                cat_resultado_usd_str = f"${cat_total_resultado_usd:,.2f} ({cat_rend_pct:.2f}%)"
+                cat_resultado_usd_str = f"${cat_total_resultado_usd:,.2f} ({cat_rend_pct_usd:.2f}%)"
                 view.portfolio_table.setItem(row_idx, 13, QTableWidgetItem(cat_resultado_usd_str))
                 cat_comisiones_ars = 0.0
                 cat_comisiones_usd = 0.0
                 for item in items:
                     descuentos = self._safe_number(item.get("comisiones_base", 0.0), 0.0)
                     moneda_item = item.get("moneda", "ARS")
-                    simbolo = item.get("simbolo", "")
-                    tc_compra = fx_rate
-                    if simbolo in tc_weighted_by_symbol and tc_weighted_amount.get(simbolo, 0) > 0:
-                        tc_compra = tc_weighted_by_symbol[simbolo] / tc_weighted_amount[simbolo]
+                    tc_compra = item.get("tc_compra", fx_rate) or fx_rate
                     if tc_compra <= 0:
                         tc_compra = fx_rate
                     if moneda_item == "USD":
@@ -2989,43 +3071,67 @@ class PortfolioAppQt(QMainWindow):
             for item in items:
                 view.portfolio_table.insertRow(row_idx)
 
-                valor_actual = item['valor_actual']
-                valor_ars = item.get('valor_ars', valor_actual)
-                valor_usd = item.get('valor_usd', valor_actual)
+                moneda_item = item.get("moneda", "ARS")
+                tc_compra = item.get("tc_compra", fx_rate) or fx_rate
+                if tc_compra <= 0:
+                    tc_compra = fx_rate
+                tc_actual = item.get("tc_actual", fx_rate) or fx_rate
+                if tc_actual <= 0:
+                    tc_actual = fx_rate
+
+                valor_compra_base = self._safe_number(item.get("valor_compra", 0.0), 0.0)
+                valor_actual_base = self._safe_number(item.get("valor_actual", 0.0), 0.0)
+                precio_compra_base = self._safe_number(item.get("precio_operacion_compra", 0.0), 0.0)
+                precio_actual_base = item.get("precio_actual", None)
+
+                if moneda_item == "USD":
+                    valor_compra_ars = valor_compra_base * tc_compra
+                    valor_compra_usd = valor_compra_base
+                    valor_actual_ars = valor_actual_base * tc_actual
+                    valor_actual_usd = valor_actual_base
+                    precio_compra_ars = precio_compra_base * tc_compra
+                    precio_compra_usd = precio_compra_base
+                    precio_actual_ars = precio_actual_base * tc_actual if precio_actual_base is not None else None
+                    precio_actual_usd = precio_actual_base
+                else:
+                    valor_compra_ars = valor_compra_base
+                    valor_compra_usd = (valor_compra_base / tc_compra) if tc_compra else 0.0
+                    valor_actual_ars = valor_actual_base
+                    valor_actual_usd = (valor_actual_base / tc_actual) if tc_actual else 0.0
+                    precio_compra_ars = precio_compra_base
+                    precio_compra_usd = (precio_compra_base / tc_compra) if tc_compra else 0.0
+                    precio_actual_ars = precio_actual_base
+                    precio_actual_usd = (
+                        (precio_actual_base / tc_actual) if (precio_actual_base is not None and tc_actual) else None
+                    )
+
+                valor_ars = valor_actual_ars
+                valor_usd = valor_actual_usd
                 total_valor_actual += valor_ars
                 total_valor_usd_tabla += valor_usd
 
+                if display_currency == "USD":
+                    precio_compra_view = precio_compra_usd
+                    valor_compra_view = valor_compra_usd
+                    precio_actual_view = precio_actual_usd
+                    valor_actual_view = valor_actual_usd
+                else:
+                    precio_compra_view = precio_compra_ars
+                    valor_compra_view = valor_compra_ars
+                    precio_actual_view = precio_actual_ars
+                    valor_actual_view = valor_actual_ars
+
                 # Formatear valores para mostrar
-                precio_operacion_compra = f"${item['precio_operacion_compra']:,.2f}" if item['precio_operacion_compra'] != 0 else "N/A"
-                valor_operacion_compra = f"${item['valor_compra']:,.2f}" if item['precio_operacion_compra'] != 0 else "N/A"
-                precio_actual = f"${item['precio_actual']:,.2f}" if item['precio_actual'] is not None else "N/D"
-                valor_actual_str = f"${valor_actual:,.2f}"
+                precio_operacion_compra = f"${precio_compra_view:,.2f}" if precio_compra_base != 0 else "N/A"
+                valor_operacion_compra = f"${valor_compra_view:,.2f}" if precio_compra_base != 0 else "N/A"
+                precio_actual = f"${precio_actual_view:,.2f}" if precio_actual_view is not None else "N/D"
+                valor_actual_str = f"${valor_actual_view:,.2f}"
                 variacion_str = f"{item['variacion_diaria']:.2f}%" if item['variacion_diaria'] is not None else "N/D"
-                diferencia_valor_str = f"${item['diferencia_valor']:,.2f}"
                 resultado_str = "$0.00 (0.00%)"
                 rendimiento_str = "0.00%"
                 resultado_usd_str = "$0.00 (0.00%)"
+                rendimiento_usd_str = "0.00%"
                 if item['precio_actual'] is not None:
-                    simbolo = item.get("simbolo", "")
-                    tc_compra = fx_rate
-                    if simbolo in tc_weighted_by_symbol and tc_weighted_amount.get(simbolo, 0) > 0:
-                        tc_compra = tc_weighted_by_symbol[simbolo] / tc_weighted_amount[simbolo]
-                    if tc_compra <= 0:
-                        tc_compra = fx_rate
-                    tc_actual = self.get_fx_rate_for_date(datetime.now(), item.get("tipo", "")) or fx_rate
-                    valor_compra = self._safe_number(item.get("valor_compra", 0.0), 0.0)
-                    valor_actual = self._safe_number(item.get("valor_actual", 0.0), 0.0)
-                    if item.get("moneda", "ARS") == "USD":
-                        valor_compra_ars = valor_compra * tc_compra
-                        valor_actual_ars = valor_actual * tc_actual
-                        valor_compra_usd = valor_compra
-                        valor_actual_usd = valor_actual
-                    else:
-                        valor_compra_ars = valor_compra
-                        valor_actual_ars = valor_actual
-                        valor_compra_usd = (valor_compra / tc_compra) if tc_compra else 0.0
-                        valor_actual_usd = (valor_actual / tc_actual) if tc_actual else 0.0
-
                     resultado_ars_val = valor_actual_ars - valor_compra_ars
                     resultado_usd_val = valor_actual_usd - valor_compra_usd
 
@@ -3044,7 +3150,8 @@ class PortfolioAppQt(QMainWindow):
 
                 # Calcular % del portafolio usando el total_valor (suma de todos los valores actuales)
                 if total_valor > 0:
-                    porcentaje_activo = (valor_ars / total_valor) * 100
+                    valor_view = valor_usd if display_currency == "USD" else valor_ars
+                    porcentaje_activo = (valor_view / total_valor) * 100
                     porcentaje_str = f"{porcentaje_activo:.2f}%"
                     suma_porcentajes += porcentaje_activo
                 else:
@@ -3163,13 +3270,17 @@ class PortfolioAppQt(QMainWindow):
         if not hasattr(view, 'portfolio_data') or not hasattr(view, 'categorias'):
             return
 
-        # Agrupar por categoría y sumar el valor actual
+        # Agrupar por categoría y sumar el valor actual según vista
+        display_currency = "ARS"
+        if getattr(view, "is_user", False):
+            display_currency = getattr(view, "asset_currency_view", "ARS")
+        value_key = "valor_usd" if display_currency == "USD" else "valor_ars"
         categorias_dict = {}
         for item in view.portfolio_data:
             cat = item['tipo']
             if cat not in categorias_dict:
                 categorias_dict[cat] = 0.0
-            categorias_dict[cat] += item['valor_actual']
+            categorias_dict[cat] += item.get(value_key, item.get('valor_actual', 0.0))
 
         # Solo consideramos categorías con valor positivo
         cats = []
@@ -3202,7 +3313,11 @@ class PortfolioAppQt(QMainWindow):
             textprops={'fontsize': 9}
         )
 
-        ax.set_title('Distribución del Portafolio por Categoría', fontsize=12, pad=25)
+        ax.set_title(
+            f'Distribución del Portafolio por Categoría ({display_currency})',
+            fontsize=12,
+            pad=25
+        )
         ax.axis('equal')  # Para que sea circular
 
         # Canvas para mostrar la figura
