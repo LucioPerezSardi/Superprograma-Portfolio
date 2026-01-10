@@ -66,6 +66,20 @@ CREATE TABLE IF NOT EXISTS fx_rates (
     venta REAL,
     UNIQUE(fecha, tipo, fuente)
 );
+
+CREATE TABLE IF NOT EXISTS crypto_prices (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    simbolo TEXT NOT NULL UNIQUE,
+    price_usd REAL NOT NULL,
+    change_24h REAL,
+    updated_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS crypto_map (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    simbolo TEXT NOT NULL UNIQUE,
+    coingecko_id TEXT NOT NULL
+);
 """
 
 
@@ -86,6 +100,9 @@ def init_db():
         cols = {row[1] for row in conn.execute("PRAGMA table_info(journal)").fetchall()}
         if "plazo" not in cols:
             conn.execute("ALTER TABLE journal ADD COLUMN plazo TEXT NOT NULL DEFAULT 'T+1'")
+        crypto_cols = {row[1] for row in conn.execute("PRAGMA table_info(crypto_prices)").fetchall()}
+        if "change_24h" not in crypto_cols:
+            conn.execute("ALTER TABLE crypto_prices ADD COLUMN change_24h REAL")
         conn.commit()
 
 
@@ -126,6 +143,66 @@ def fetch_fx_rate_on_or_before(fecha: str, tipo: str, fuente: str):
             (fecha, tipo, fuente),
         )
         row = cur.fetchone()
+        return dict(row) if row else None
+
+
+def upsert_crypto_price(simbolo: str, price_usd: float, updated_at: str, change_24h: float | None = None) -> None:
+    with get_conn() as conn:
+        conn.execute(
+            """
+            INSERT INTO crypto_prices (simbolo, price_usd, change_24h, updated_at)
+            VALUES (?, ?, ?, ?)
+            ON CONFLICT(simbolo) DO UPDATE SET
+                price_usd = excluded.price_usd,
+                change_24h = excluded.change_24h,
+                updated_at = excluded.updated_at
+            """,
+            (simbolo, price_usd, change_24h, updated_at),
+        )
+        conn.commit()
+
+
+def fetch_crypto_price(simbolo: str):
+    with get_conn() as conn:
+        row = conn.execute(
+            "SELECT simbolo, price_usd, change_24h, updated_at FROM crypto_prices WHERE simbolo = ?",
+            (simbolo,),
+        ).fetchone()
+        return dict(row) if row else None
+
+
+def fetch_crypto_prices(simbolos):
+    if not simbolos:
+        return {}
+    placeholders = ",".join("?" for _ in simbolos)
+    with get_conn() as conn:
+        rows = conn.execute(
+            f"SELECT simbolo, price_usd, change_24h, updated_at FROM crypto_prices WHERE simbolo IN ({placeholders})",
+            list(simbolos),
+        ).fetchall()
+        return {row["simbolo"]: dict(row) for row in rows}
+
+
+def upsert_crypto_map(simbolo: str, coingecko_id: str) -> None:
+    with get_conn() as conn:
+        conn.execute(
+            """
+            INSERT INTO crypto_map (simbolo, coingecko_id)
+            VALUES (?, ?)
+            ON CONFLICT(simbolo) DO UPDATE SET
+                coingecko_id = excluded.coingecko_id
+            """,
+            (simbolo, coingecko_id),
+        )
+        conn.commit()
+
+
+def fetch_crypto_map(simbolo: str):
+    with get_conn() as conn:
+        row = conn.execute(
+            "SELECT simbolo, coingecko_id FROM crypto_map WHERE simbolo = ?",
+            (simbolo,),
+        ).fetchone()
         return dict(row) if row else None
 
 
