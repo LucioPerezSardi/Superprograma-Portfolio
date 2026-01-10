@@ -824,8 +824,6 @@ class PortfolioAppQt(QMainWindow):
         if not getattr(view, "is_user", False):
             return
         view.liquidity_currency = currency
-        view.liquidity_ars_btn.setChecked(currency == "ARS")
-        view.liquidity_usd_btn.setChecked(currency == "USD")
         if view.liquidity_chart_frame.isVisible():
             self.draw_liquidity_chart(view)
 
@@ -850,7 +848,7 @@ class PortfolioAppQt(QMainWindow):
             view.liquidity_chart_layout.addWidget(no_data_label)
             return
 
-        fig = Figure(figsize=(6, 3.5), dpi=100)
+        fig = Figure(figsize=(5, 3.2), dpi=100)
         ax = fig.add_subplot(111)
         colors = [self.get_broker_color(broker) for broker in labels]
         chart_bg = self.get_theme_value("chart_bg", "#1b1f24")
@@ -939,7 +937,12 @@ class PortfolioAppQt(QMainWindow):
             liquidity_pct = 0
 
         view.liquidity_button.setText(
-            f"LIQUIDEZ TOTAL: ARS ${total_liq_ars:,.2f} | USD ${total_liq_usd:,.2f}"
+            "LIQUIDEZ TOTAL"
+        )
+        ars_link = "<a href='ARS'>ARS</a>"
+        usd_link = "<a href='USD'>USD</a>"
+        view.liquidity_currency_label.setText(
+            f"{ars_link}: ${total_liq_ars:,.2f} &nbsp;|&nbsp; {usd_link}: ${total_liq_usd:,.2f}"
         )
         view.liquidity_total_label.setText(
             f"El total de su capital líquido es ${total_liq_ars_equiv:,.2f} ({liquidity_pct:.2f}%)"
@@ -1828,41 +1831,57 @@ class PortfolioAppQt(QMainWindow):
             liquidity_layout.setContentsMargins(0, 0, 0, 0)
 
             liquidity_header = QHBoxLayout()
-            view.liquidity_button = QPushButton("LIQUIDEZ TOTAL: ARS $0.00 | USD $0.00")
+            liquidity_header.setSpacing(6)
+            view.liquidity_button = QPushButton("LIQUIDEZ TOTAL")
             view.liquidity_button.setCursor(Qt.CursorShape.PointingHandCursor)
             view.liquidity_button.clicked.connect(
                 lambda _checked=False, v=view: self.toggle_liquidity_chart(v)
             )
-            liquidity_header.addWidget(view.liquidity_button)
-
             view.liquidity_currency = "ARS"
-            view.liquidity_ars_btn = QPushButton("ARS")
-            view.liquidity_ars_btn.setCheckable(True)
-            view.liquidity_ars_btn.setChecked(True)
-            view.liquidity_ars_btn.clicked.connect(
-                lambda _checked=False, v=view: self.set_liquidity_currency("ARS", v)
+            view.liquidity_currency_label = QLabel()
+            view.liquidity_currency_label.setTextFormat(Qt.TextFormat.RichText)
+            view.liquidity_currency_label.setOpenExternalLinks(False)
+            view.liquidity_currency_label.linkActivated.connect(
+                lambda link, v=view: self.set_liquidity_currency(link, v)
             )
-            view.liquidity_usd_btn = QPushButton("USD")
-            view.liquidity_usd_btn.setCheckable(True)
-            view.liquidity_usd_btn.clicked.connect(
-                lambda _checked=False, v=view: self.set_liquidity_currency("USD", v)
+            view.liquidity_currency_label.setStyleSheet(
+                "QLabel { padding: 6px 10px; border-radius: 4px; background: #1b1f24; }"
+                "QLabel a { color: #f28e2b; text-decoration: underline; }"
             )
-            liquidity_header.addWidget(view.liquidity_ars_btn)
-            liquidity_header.addWidget(view.liquidity_usd_btn)
+            liquidity_header.addWidget(view.liquidity_button)
+            liquidity_header.addWidget(view.liquidity_currency_label)
             liquidity_header.addStretch()
             liquidity_layout.addLayout(liquidity_header)
 
             view.liquidity_chart_frame = QFrame()
             chart_frame_layout = QVBoxLayout(view.liquidity_chart_frame)
             chart_list_layout = QHBoxLayout()
+            chart_list_layout.setSpacing(16)
+            chart_list_layout.setContentsMargins(0, 6, 0, 0)
 
             view.liquidity_chart_container = QFrame()
             view.liquidity_chart_layout = QVBoxLayout(view.liquidity_chart_container)
-            chart_list_layout.addWidget(view.liquidity_chart_container, 2)
+            view.liquidity_chart_container.setSizePolicy(
+                QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding
+            )
+            chart_list_layout.addWidget(view.liquidity_chart_container, 3)
 
+            view.liquidity_list_container = QFrame()
+            view.liquidity_list_container.setStyleSheet(
+                "QFrame { background: transparent; border: none; }"
+            )
+            list_layout = QVBoxLayout(view.liquidity_list_container)
+            list_layout.setContentsMargins(0, 0, 0, 0)
             view.liquidity_list = QListWidget()
-            view.liquidity_list.setMinimumWidth(220)
-            chart_list_layout.addWidget(view.liquidity_list, 1)
+            view.liquidity_list.setFrameShape(QFrame.Shape.NoFrame)
+            view.liquidity_list.setSpacing(6)
+            view.liquidity_list.setStyleSheet(
+                "QListWidget { background: transparent; }"
+                "QListWidget::item { padding: 4px 2px; }"
+            )
+            list_layout.addWidget(view.liquidity_list)
+            view.liquidity_list_container.setMinimumWidth(260)
+            chart_list_layout.addWidget(view.liquidity_list_container, 1)
 
             chart_frame_layout.addLayout(chart_list_layout)
             view.liquidity_chart_frame.setVisible(False)
