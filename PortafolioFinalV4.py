@@ -965,6 +965,36 @@ class PortfolioAppQt(QMainWindow):
         if header_ppc:
             header_ppc.setToolTip("PRECIO PROMEDIO DE COMPRA")
 
+    def apply_currency_column_visibility(self, view):
+        currency = "Todos"
+        combo = getattr(view, "currency_filter_combo", None)
+        if combo is not None:
+            currency = combo.currentText()
+        show_ars = currency in ("Todos", "ARS")
+        show_usd = currency in ("Todos", "USD")
+
+        ars_columns = [9, 11, 12, 14]
+        usd_columns = [10, 13, 15]
+        for col in ars_columns:
+            if col < view.portfolio_table.columnCount():
+                view.portfolio_table.setColumnHidden(col, not show_ars)
+        for col in usd_columns:
+            if col < view.portfolio_table.columnCount():
+                view.portfolio_table.setColumnHidden(col, not show_usd)
+
+        if getattr(view, "is_user", False):
+            if hasattr(view, "summary_ars_label"):
+                view.summary_ars_label.setVisible(show_ars)
+            if hasattr(view, "summary_usd_label"):
+                view.summary_usd_label.setVisible(show_usd)
+
+    def adjust_portfolio_table(self, view):
+        header = view.portfolio_table.horizontalHeader()
+        header.setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
+        header.setStretchLastSection(True)
+        view.portfolio_table.resizeColumnsToContents()
+        view.portfolio_table.resizeRowsToContents()
+
     def update_status_labels(self, message=None):
         if message is None:
             message = f"Última actualización: {self.last_update if self.last_update else '-'}"
@@ -2117,10 +2147,14 @@ class PortfolioAppQt(QMainWindow):
             "Valor ARS",
             "Valor USD",
             "% del\nPortafolio (ARS)",
-            "Resultado ARS",
-            "Resultado USD"
+            "Resultado ARS (%)",
+            "Resultado USD",
+            "Comisiones ARS",
+            "Comisiones USD"
         ])
-        view.portfolio_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
+        header = view.portfolio_table.horizontalHeader()
+        header.setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
+        header.setStretchLastSection(True)
         view.portfolio_table.verticalHeader().setVisible(False)
         view.portfolio_table.setSizeAdjustPolicy(QAbstractScrollArea.SizeAdjustPolicy.AdjustToContents)
 
@@ -3111,6 +3145,9 @@ class PortfolioAppQt(QMainWindow):
             font = item.font()
             font.setBold(True)
             item.setFont(font)
+
+        self.apply_currency_column_visibility(view)
+        self.adjust_portfolio_table(view)
 
         # Actualizar gráficos si es necesario
         if view.portfolio_tabs.currentIndex() == 1:  # Si está en la pestaña de gráficos
