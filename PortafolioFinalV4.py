@@ -2686,6 +2686,64 @@ class PortfolioAppQt(QMainWindow):
         else:
             total_valor = total_valor_ars
 
+        if getattr(view, "is_user", False) and getattr(view, "group_by", "tipo") == "tipo":
+            grouped = {}
+            passthrough = []
+            for item in table_data:
+                simbolo = item.get("simbolo")
+                if not simbolo:
+                    passthrough.append(item)
+                    continue
+                key = (item.get("tipo"), simbolo, item.get("moneda", "ARS"))
+                if key not in grouped:
+                    grouped[key] = {
+                        **item,
+                        "cantidad": 0.0,
+                        "valor_compra": 0.0,
+                        "valor_actual": 0.0,
+                        "valor_ars": 0.0,
+                        "valor_usd": 0.0,
+                        "descuentos": 0.0,
+                        "rendimientos": 0.0,
+                        "comisiones_base": 0.0,
+                        "_brokers": set(),
+                    }
+                g = grouped[key]
+                g["_brokers"].add(item.get("broker"))
+                g["cantidad"] += self._safe_number(item.get("cantidad", 0.0), 0.0)
+                g["valor_compra"] += self._safe_number(item.get("valor_compra", 0.0), 0.0)
+                g["valor_actual"] += self._safe_number(item.get("valor_actual", 0.0), 0.0)
+                g["valor_ars"] += self._safe_number(item.get("valor_ars", 0.0), 0.0)
+                g["valor_usd"] += self._safe_number(item.get("valor_usd", 0.0), 0.0)
+                g["descuentos"] += self._safe_number(item.get("descuentos", 0.0), 0.0)
+                g["rendimientos"] += self._safe_number(item.get("rendimientos", 0.0), 0.0)
+                g["comisiones_base"] += self._safe_number(item.get("comisiones_base", 0.0), 0.0)
+                if g.get("precio_actual") is None and item.get("precio_actual") is not None:
+                    g["precio_actual"] = item.get("precio_actual")
+                if g.get("variacion_diaria") is None and item.get("variacion_diaria") is not None:
+                    g["variacion_diaria"] = item.get("variacion_diaria")
+
+            aggregated = []
+            for g in grouped.values():
+                if g["cantidad"] > 0:
+                    g["precio_operacion_compra"] = g["valor_compra"] / g["cantidad"]
+                    g["precio_actual"] = g["valor_actual"] / g["cantidad"]
+                else:
+                    g["precio_operacion_compra"] = 0.0
+                g["diferencia_valor"] = g["valor_actual"] - g["valor_compra"]
+                g["resultado"] = g["diferencia_valor"] - g["descuentos"] + g["rendimientos"]
+                brokers = g.pop("_brokers", set())
+                g["broker"] = "Varios" if len(brokers) > 1 else next(iter(brokers), "")
+                aggregated.append(g)
+
+            table_data = aggregated + passthrough
+            tipo_valores = {}
+            for p in table_data:
+                tipo_valores[p['tipo']] = tipo_valores.get(p['tipo'], 0) + p.get('valor_ars', 0)
+            total_valor_ars = sum(p.get('valor_ars', 0) for p in table_data)
+            total_valor_usd = sum(p.get('valor_usd', 0) for p in table_data)
+            total_valor = total_valor_ars
+
         if getattr(view, "is_user", False):
             self.update_liquidity_section(view, total_assets_ars, fx_rate)
 
