@@ -19,6 +19,7 @@ CREATE TABLE IF NOT EXISTS journal (
     tipo_operacion TEXT NOT NULL,
     simbolo TEXT,
     detalle TEXT,
+    plazo TEXT NOT NULL DEFAULT 'T+1',
     cantidad REAL NOT NULL,
     precio REAL NOT NULL,
     rendimiento REAL NOT NULL,
@@ -55,6 +56,16 @@ CREATE TABLE IF NOT EXISTS portfolio (
     cantidad REAL NOT NULL,
     precio_prom REAL NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS fx_rates (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    fecha TEXT NOT NULL,
+    tipo TEXT NOT NULL,
+    fuente TEXT NOT NULL,
+    compra REAL,
+    venta REAL,
+    UNIQUE(fecha, tipo, fuente)
+);
 """
 
 
@@ -72,6 +83,77 @@ def init_db():
     os.makedirs("data", exist_ok=True)
     with get_conn() as conn:
         conn.executescript(SCHEMA)
+        cols = {row[1] for row in conn.execute("PRAGMA table_info(journal)").fetchall()}
+        if "plazo" not in cols:
+            conn.execute("ALTER TABLE journal ADD COLUMN plazo TEXT NOT NULL DEFAULT 'T+1'")
+        conn.commit()
+
+
+def upsert_fx_rate(fecha: str, tipo: str, fuente: str, compra: float, venta: float) -> None:
+    with get_conn() as conn:
+        conn.execute(
+            """
+            INSERT INTO fx_rates (fecha, tipo, fuente, compra, venta)
+            VALUES (?, ?, ?, ?, ?)
+            ON CONFLICT(fecha, tipo, fuente) DO UPDATE SET
+                compra = excluded.compra,
+                venta = excluded.venta
+            """,
+            (fecha, tipo, fuente, compra, venta),
+        )
+        conn.commit()
+
+
+def fetch_fx_rate(fecha: str, tipo: str, fuente: str = "dolarhoy"):
+    with get_conn() as conn:
+        cur = conn.execute(
+            "SELECT * FROM fx_rates WHERE fecha = ? AND tipo = ? AND fuente = ?",
+            (fecha, tipo, fuente),
+        )
+        row = cur.fetchone()
+        return dict(row) if row else None
+
+
+def fetch_fx_rate_on_or_before(fecha: str, tipo: str, fuente: str):
+    with get_conn() as conn:
+        cur = conn.execute(
+            """
+            SELECT * FROM fx_rates
+            WHERE fecha <= ? AND tipo = ? AND fuente = ?
+            ORDER BY fecha DESC
+            LIMIT 1
+            """,
+            (fecha, tipo, fuente),
+        )
+        row = cur.fetchone()
+        return dict(row) if row else None
+
+
+def fetch_fx_date_bounds(tipo: str, fuente: str):
+    with get_conn() as conn:
+        row = conn.execute(
+            "SELECT MIN(fecha) AS min_date, MAX(fecha) AS max_date FROM fx_rates WHERE tipo = ? AND fuente = ?",
+            (tipo, fuente),
+        ).fetchone()
+        if not row:
+            return None, None
+        return row["min_date"], row["max_date"]
+
+
+def upsert_fx_rates_bulk(rows):
+    if not rows:
+        return
+    with get_conn() as conn:
+        conn.executemany(
+            """
+            INSERT INTO fx_rates (fecha, tipo, fuente, compra, venta)
+            VALUES (?, ?, ?, ?, ?)
+            ON CONFLICT(fecha, tipo, fuente) DO UPDATE SET
+                compra = excluded.compra,
+                venta = excluded.venta
+            """,
+            rows,
+        )
         conn.commit()
 
 
@@ -81,6 +163,7 @@ def import_journal_from_csv(csv_path):
     with open(csv_path, "r", encoding="utf-8") as f:
         reader = csv.DictReader(f)
         for row in reader:
+            row["Plazo"] = row.get("Plazo") or "T+1"
             rows.append(row)
     with get_conn() as conn:
         conn.execute("DELETE FROM journal")
@@ -89,13 +172,13 @@ def import_journal_from_csv(csv_path):
                 """
                 INSERT INTO journal (
                     fecha, tipo, tipo_operacion, simbolo, detalle,
-                    cantidad, precio, rendimiento, total_sin_desc,
+                    plazo, cantidad, precio, rendimiento, total_sin_desc,
                     comision, iva_21, derechos, iva_derechos,
                     total_descuentos, costo_total, ingreso_total, balance,
                     broker, moneda, tc_usd_ars
                 ) VALUES (
                     :Fecha, :Tipo, :Tipo_Operacion, :Simbolo, :Detalle,
-                    CAST(:Cantidad AS REAL), CAST(:Precio AS REAL),
+                    :Plazo, CAST(:Cantidad AS REAL), CAST(:Precio AS REAL),
                     CAST(:Rendimiento AS REAL), CAST(:Total_Sin_Descuentos AS REAL),
                     CAST(:Comision AS REAL), CAST(:IVA_21 AS REAL),
                     CAST(:Derechos AS REAL), CAST(:IVA_Derechos AS REAL),
@@ -175,13 +258,13 @@ def insert_journal_row(row):
             """
             INSERT INTO journal (
                 fecha, tipo, tipo_operacion, simbolo, detalle,
-                cantidad, precio, rendimiento, total_sin_desc,
+                plazo, cantidad, precio, rendimiento, total_sin_desc,
                 comision, iva_21, derechos, iva_derechos,
                 total_descuentos, costo_total, ingreso_total, balance,
                 broker, moneda, tc_usd_ars
             ) VALUES (
                 :fecha, :tipo, :tipo_operacion, :simbolo, :detalle,
-                :cantidad, :precio, :rendimiento, :total_sin_desc,
+                :plazo, :cantidad, :precio, :rendimiento, :total_sin_desc,
                 :comision, :iva_21, :derechos, :iva_derechos,
                 :total_descuentos, :costo_total, :ingreso_total, :balance,
                 :broker, :moneda, :tc_usd_ars

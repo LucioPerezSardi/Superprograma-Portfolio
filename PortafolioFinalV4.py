@@ -1,12 +1,18 @@
 ﻿# -*- coding: utf-8 -*-
 import os
 import threading
+import json
+import smtplib
+import ssl
+import math
 import pandas as pd
 from datetime import datetime, timedelta
 import numpy as np
 import sys
 import sqlite3
 import winreg
+import re
+import urllib.request
 from types import SimpleNamespace
 
 # SOLUCION AL PROBLEMA DE MATPLOTLIB/PYQT6
@@ -41,6 +47,11 @@ from db_utils import (
     import_journal_from_csv,
     import_analysis_from_csv,
     import_portfolio_from_csv,
+    upsert_fx_rate,
+    fetch_fx_rate,
+    fetch_fx_rate_on_or_before,
+    fetch_fx_date_bounds,
+    upsert_fx_rates_bulk,
 )
 from app.ui.analysis_tab import AnalysisTab
 from app.ui.threads import DownloadThread
@@ -51,6 +62,8 @@ from services.portfolio import (
     recompute_portfolio_rows,
     next_plazo_fijo_number,
     calcular_operacion,
+    compute_bmb_monthly_volume,
+    get_bmb_tier,
     calcular_descuentos_y_totales,
 )
 from services.market import load_market_data, update_market_data
@@ -64,6 +77,70 @@ LEGACY_ANALYSIS = os.path.join(DATA_DIR, "Analisis.csv")
 # Brokers disponibles
 BROKERS = ["IOL", "BMB", "COCOS", "BALANZ", "BINANCE", "KUCOIN", "BYBIT", "BINGX"]
 CURRENCIES = ["ARS", "USD"]
+DOLARHOY_URLS = {
+    "mep": "https://dolarhoy.com/cotizacion-dolar-mep",
+    "ccl": "https://dolarhoy.com/cotizacion-dolar-contado-con-liqui",
+    "oficial": "https://dolarhoy.com/cotizacion-dolar-oficial",
+    "blue": "https://dolarhoy.com/cotizacion-dolar-blue",
+}
+
+AMBITO_ENDPOINTS = {
+    "mep": "https://mercados.ambito.com/dolarrava/mep/historico-general/",
+    "ccl": "https://mercados.ambito.com/dolarrava/cl/historico-general/",
+    "blue": "https://mercados.ambito.com/dolar/informal/historico-general/",
+    "cripto": "https://mercados.ambito.com/dolarcripto/grafico/",
+}
+FX_SOURCE_BY_KIND = {
+    "mep": "ambito",
+    "ccl": "ambito",
+    "blue": "ambito",
+    "cripto": "ambito",
+    "oficial": "bcra",
+}
+FX_BACKFILL_START = datetime(2020, 1, 1)
+USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+SMTP_HOST = os.getenv("SMTP_HOST", "smtp.gmail.com")
+SMTP_PORT = int(os.getenv("SMTP_PORT", "587"))
+SMTP_USER = os.getenv("SMTP_USER", "")
+SMTP_PASS = os.getenv("SMTP_PASS", "")
+SMTP_FROM = os.getenv("SMTP_FROM", SMTP_USER)
+SMTP_TO = os.getenv("SMTP_TO", SMTP_USER)
+EMAIL_SUBJECT_PREFIX = os.getenv("EMAIL_SUBJECT_PREFIX", "Superprograma Portfolio")
+CONFIG_PATH = os.path.join(DATA_DIR, "app_config.json")
+
+
+def load_app_config():
+    try:
+        with open(CONFIG_PATH, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        return {}
+
+
+def save_app_config(config):
+    try:
+        with open(CONFIG_PATH, "w", encoding="utf-8") as f:
+            json.dump(config, f)
+    except Exception as e:
+        print(f"Error guardando config: {e}")
+
+
+def send_email(subject, body):
+    if not SMTP_USER or not SMTP_PASS or not SMTP_TO:
+        print("SMTP no configurado para enviar notificaciones.")
+        return False
+    message = f"From: {SMTP_FROM}\r\nTo: {SMTP_TO}\r\nSubject: {subject}\r\n\r\n{body}"
+    context = ssl.create_default_context()
+    try:
+        with smtplib.SMTP(SMTP_HOST, SMTP_PORT, timeout=20) as server:
+            server.ehlo()
+            server.starttls(context=context)
+            server.login(SMTP_USER, SMTP_PASS)
+            server.sendmail(SMTP_FROM, [SMTP_TO], message)
+        return True
+    except Exception as e:
+        print(f"Error enviando mail: {e}")
+        return False
 
 # Crear directorio si no existe
 os.makedirs(DATA_DIR, exist_ok=True)
@@ -105,6 +182,9 @@ class PortfolioAppQt(QMainWindow):
         self.setGeometry(100, 100, 1400, 900)
 
         init_files()
+        self.fx_backfill_done = False
+        self.fx_update_running = False
+        self.notify_state_path = os.path.join(DATA_DIR, "notify_state.json")
 
         # Crear widget central y layout principal
         central_widget = QWidget()
@@ -139,6 +219,7 @@ class PortfolioAppQt(QMainWindow):
             "BYBIT": "#b07aa1",
             "BINGX": "#ff9da7",
         }
+        QTimer.singleShot(3000, lambda: self.start_fx_update_thread(run_backfill=True))
 
         # Inicializar atributos para actualización automática
         self.auto_update_interval = 5  # Valor por defecto en minutos
@@ -226,6 +307,8 @@ class PortfolioAppQt(QMainWindow):
                 "table_category_bg": "#e6e6e6",
                 "table_category_alt_bg": "#f0f0f0",
                 "table_total_bg": "#dcdcdc",
+                "chart_bg": "#ffffff",
+                "chart_text": "#1a1a1a",
                 "qss": (
                     "QWidget { background: #f6f7f9; color: #1a1a1a; }"
                     "QMainWindow { background: #f6f7f9; }"
@@ -250,6 +333,8 @@ class PortfolioAppQt(QMainWindow):
                 "table_category_bg": "#2a313b",
                 "table_category_alt_bg": "#242b33",
                 "table_total_bg": "#303845",
+                "chart_bg": "#1b1f24",
+                "chart_text": "#e6e6e6",
                 "qss": (
                     "QWidget { background: #14171a; color: #e6e6e6; }"
                     "QMainWindow { background: #14171a; }"
@@ -314,6 +399,369 @@ class PortfolioAppQt(QMainWindow):
     def refresh_portfolios(self):
         for view in self.get_portfolio_views():
             self.load_portfolio(view)
+
+    def compute_bmb_tier(self, broker, fecha_dt):
+        if (broker or "").upper() != "BMB":
+            return None
+        journal_rows = fetch_journal()
+        first_of_month = fecha_dt.replace(day=1)
+        prev_month_last = first_of_month - timedelta(days=1)
+        volume = compute_bmb_monthly_volume(journal_rows, prev_month_last)
+        return get_bmb_tier(volume)
+
+    def is_intraday_bonus(
+        self,
+        broker,
+        tipo,
+        tipo_op,
+        simbolo,
+        cantidad,
+        moneda,
+        plazo,
+        fecha_dt,
+    ):
+        if (broker or "").upper() != "BMB":
+            return False
+        if tipo not in ["Acciones AR", "CEDEARs", "Bonos AR"]:
+            return False
+        if tipo_op not in ["Compra", "Venta"]:
+            return False
+        if not simbolo:
+            return False
+        fecha_str = fecha_dt.strftime("%Y-%m-%d")
+        opposite = "Venta" if tipo_op == "Compra" else "Compra"
+        for row in fetch_journal():
+            if row.get("broker") != broker:
+                continue
+            if row.get("tipo") != tipo:
+                continue
+            if row.get("tipo_operacion") != opposite:
+                continue
+            if row.get("simbolo") != simbolo:
+                continue
+            if row.get("moneda") != moneda:
+                continue
+            if (row.get("plazo") or "T+1") != plazo:
+                continue
+            if row.get("fecha") != fecha_str:
+                continue
+            try:
+                row_cantidad = float(row.get("cantidad", 0) or 0)
+            except Exception:
+                row_cantidad = 0
+            if abs(row_cantidad - cantidad) <= 1e-6:
+                return True
+        return False
+
+    def get_fx_kind_for_tipo(self, tipo):
+        if tipo in ["CEDEARs", "ETFs"]:
+            return "ccl"
+        if tipo in ["Criptomonedas"]:
+            return "cripto"
+        return "mep"
+
+    def fetch_dolarhoy_rate(self, url):
+        try:
+            html = urllib.request.urlopen(url, timeout=10).read().decode("utf-8", errors="ignore")
+        except Exception as e:
+            print(f"Error leyendo {url}: {e}")
+            return None, None
+
+        compra_match = re.search(r"Compra</div>\\s*<div class=\"value\">\\$\\s*([0-9\\.,]+)", html)
+        venta_match = re.search(r"Venta</div>\\s*<div class=\"value\">\\$\\s*([0-9\\.,]+)", html)
+        if not compra_match and not venta_match:
+            return None, None
+
+        def _parse(val):
+            return float(val.replace(".", "").replace(",", "."))
+
+        compra = _parse(compra_match.group(1)) if compra_match else None
+        venta = _parse(venta_match.group(1)) if venta_match else None
+        return compra, venta
+
+    def _parse_decimal(self, value):
+        if value is None:
+            return None
+        if isinstance(value, (int, float)):
+            return float(value)
+        text = str(value).strip()
+        if not text:
+            return None
+        if "," in text:
+            text = text.replace(".", "").replace(",", ".")
+        return float(text)
+
+    def _parse_ambito_date(self, value):
+        if not value:
+            return None
+        text = str(value).strip()
+        for fmt in ("%d/%m/%Y", "%Y-%m-%d"):
+            try:
+                return datetime.strptime(text, fmt)
+            except ValueError:
+                continue
+        return None
+
+    def _load_notify_state(self):
+        try:
+            with open(self.notify_state_path, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except Exception:
+            return {}
+
+    def _save_notify_state(self, state):
+        try:
+            with open(self.notify_state_path, "w", encoding="utf-8") as f:
+                json.dump(state, f)
+        except Exception as e:
+            print(f"Error guardando notify_state: {e}")
+
+    def _should_send_notification(self, key):
+        state = self._load_notify_state()
+        today = datetime.now().strftime("%Y-%m-%d")
+        if state.get(key) == today:
+            return False
+        state[key] = today
+        self._save_notify_state(state)
+        return True
+
+    def _send_notification(self, subject, body, key):
+        if datetime.now().weekday() >= 5:
+            return
+        if not self._should_send_notification(key):
+            return
+        subject_line = f"{EMAIL_SUBJECT_PREFIX} - {subject}"
+        send_email(subject_line, body)
+
+    def _fetch_ambito_series(self, tipo, start_dt, end_dt):
+        base = AMBITO_ENDPOINTS.get(tipo)
+        if not base:
+            return {}
+        start_str = start_dt.strftime("%Y-%m-%d")
+        end_str = end_dt.strftime("%Y-%m-%d")
+        url = f"{base}{start_str}/{end_str}"
+        req = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
+        try:
+            raw = urllib.request.urlopen(req, timeout=10).read().decode("utf-8", errors="ignore")
+            data = json.loads(raw)
+        except Exception as e:
+            print(f"Error leyendo Ambito {tipo}: {e}")
+            return {}
+
+        if not isinstance(data, list) or len(data) < 2:
+            return {}
+        series = {}
+        for row in data[1:]:
+            if not row or len(row) < 2:
+                continue
+            dt = self._parse_ambito_date(row[0])
+            val = self._parse_decimal(row[1])
+            if dt and val is not None:
+                series[dt.strftime("%Y-%m-%d")] = float(val)
+        return series
+
+    def _fill_missing_dates(self, start_dt, end_dt, series):
+        filled = {}
+        current = start_dt
+        last_val = None
+        while current <= end_dt:
+            key = current.strftime("%Y-%m-%d")
+            if key in series:
+                last_val = series[key]
+                filled[key] = last_val
+            elif last_val is not None:
+                filled[key] = last_val
+            current += timedelta(days=1)
+        return filled
+
+    def update_fx_rates_from_ambito_range(self, tipo, start_dt, end_dt):
+        series = self._fetch_ambito_series(tipo, start_dt, end_dt)
+        if not series:
+            return False, f"Sin datos Ambito {tipo} {start_dt:%Y-%m-%d} a {end_dt:%Y-%m-%d}"
+        filled = self._fill_missing_dates(start_dt, end_dt, series)
+        rows = [
+            (fecha, tipo, "ambito", val, val)
+            for fecha, val in filled.items()
+        ]
+        upsert_fx_rates_bulk(rows)
+        return True, None
+
+    def ensure_fx_backfill(self):
+        if self.fx_backfill_done:
+            return []
+        today = datetime.now()
+        errors = []
+        for tipo in AMBITO_ENDPOINTS:
+            min_date, _ = fetch_fx_date_bounds(tipo, "ambito")
+            if min_date and min_date <= FX_BACKFILL_START.strftime("%Y-%m-%d"):
+                continue
+            current = FX_BACKFILL_START
+            while current <= today:
+                chunk_end = min(current + timedelta(days=180), today)
+                ok, err = self.update_fx_rates_from_ambito_range(tipo, current, chunk_end)
+                if not ok and err:
+                    errors.append(err)
+                current = chunk_end + timedelta(days=1)
+        self.fx_backfill_done = True
+        return errors
+
+    def update_fx_rates_from_ambito_daily(self):
+        today = datetime.now()
+        errors = []
+        for tipo in AMBITO_ENDPOINTS:
+            _, max_date = fetch_fx_date_bounds(tipo, "ambito")
+            if not max_date:
+                continue
+            try:
+                last_dt = datetime.strptime(max_date, "%Y-%m-%d")
+            except ValueError:
+                last_dt = today - timedelta(days=7)
+            start_dt = max(last_dt - timedelta(days=7), FX_BACKFILL_START)
+            if start_dt > today:
+                continue
+            ok, err = self.update_fx_rates_from_ambito_range(tipo, start_dt, today)
+            if not ok and err:
+                errors.append(err)
+        return errors
+
+    def update_fx_rates_from_bcra(self):
+        token = os.getenv("BCRA_API_TOKEN", "").strip()
+        if not token:
+            config = load_app_config()
+            token = str(config.get("BCRA_API_TOKEN", "")).strip()
+        if not token:
+            print("BCRA_API_TOKEN no configurado. Salteando tipo de cambio oficial.")
+            return "BCRA_API_TOKEN no configurado."
+        url = "https://api.estadisticasbcra.com/usd_of"
+        req = urllib.request.Request(
+            url,
+            headers={
+                "Authorization": f"BEARER {token}",
+                "User-Agent": USER_AGENT,
+            },
+        )
+        try:
+            raw = urllib.request.urlopen(req, timeout=10).read().decode("utf-8", errors="ignore")
+            data = json.loads(raw)
+        except Exception as e:
+            print(f"Error leyendo BCRA: {e}")
+            return f"Error leyendo BCRA: {e}"
+        if not isinstance(data, list):
+            return "Respuesta BCRA invalida."
+        _, max_date = fetch_fx_date_bounds("oficial", "bcra")
+        last_dt = None
+        if max_date:
+            try:
+                last_dt = datetime.strptime(max_date, "%Y-%m-%d")
+            except ValueError:
+                last_dt = None
+        rows = []
+        for row in data:
+            fecha = row.get("d")
+            val = row.get("v")
+            dt = None
+            try:
+                dt = datetime.strptime(fecha, "%Y-%m-%d")
+            except Exception:
+                dt = None
+            if not dt:
+                continue
+            if last_dt and dt <= last_dt:
+                continue
+            value = self._parse_decimal(val)
+            if value is None:
+                continue
+            rows.append((dt.strftime("%Y-%m-%d"), "oficial", "bcra", value, value))
+        upsert_fx_rates_bulk(rows)
+        return None
+
+    def update_fx_rates_from_sources(self, run_backfill=False):
+        errors = []
+        if run_backfill:
+            try:
+                errors.extend(self.ensure_fx_backfill())
+            except Exception as e:
+                errors.append(f"Backfill FX falló: {e}")
+        try:
+            errors.extend(self.update_fx_rates_from_ambito_daily())
+        except Exception as e:
+            errors.append(f"Actualización FX Ambito falló: {e}")
+        try:
+            err = self.update_fx_rates_from_bcra()
+            if err:
+                errors.append(err)
+        except Exception as e:
+            errors.append(f"Actualización FX BCRA falló: {e}")
+        if errors:
+            body = "Se detectaron errores en la actualización de tipos de cambio:\n\n"
+            body += "\n".join(f"- {e}" for e in errors)
+            self._send_notification("Fallo de actualización FX", body, "fx_update_error")
+
+    def start_fx_update_thread(self, run_backfill=False):
+        if self.fx_update_running:
+            return
+        self.fx_update_running = True
+
+        def _worker():
+            try:
+                self.update_fx_rates_from_sources(run_backfill=run_backfill)
+            finally:
+                self.fx_update_running = False
+
+        threading.Thread(target=_worker, daemon=True).start()
+
+    def get_fx_rate_for_date(self, fecha_dt, tipo):
+        kind = self.get_fx_kind_for_tipo(tipo)
+        fecha_str = fecha_dt.strftime("%Y-%m-%d")
+        fuente = FX_SOURCE_BY_KIND.get(kind, "dolarhoy")
+        row = fetch_fx_rate(fecha_str, kind, fuente)
+        if row:
+            return row.get("venta") or row.get("compra")
+        row = fetch_fx_rate_on_or_before(fecha_str, kind, fuente)
+        if row:
+            return row.get("venta") or row.get("compra")
+        if fuente != "dolarhoy":
+            row = fetch_fx_rate(fecha_str, kind, "dolarhoy")
+            if row:
+                return row.get("venta") or row.get("compra")
+            row = fetch_fx_rate_on_or_before(fecha_str, kind, "dolarhoy")
+            if row:
+                return row.get("venta") or row.get("compra")
+        return None
+
+    def _safe_number(self, value, default=0.0):
+        try:
+            num = float(value)
+        except Exception:
+            return default
+        if math.isnan(num) or math.isinf(num):
+            return default
+        return num
+
+    def get_ccl_rate_for_date(self, fecha_dt):
+        fecha_str = fecha_dt.strftime("%Y-%m-%d")
+        fuente = FX_SOURCE_BY_KIND.get("ccl", "dolarhoy")
+        row = fetch_fx_rate(fecha_str, "ccl", fuente)
+        if row:
+            return row.get("venta") or row.get("compra")
+        row = fetch_fx_rate_on_or_before(fecha_str, "ccl", fuente)
+        if row:
+            return row.get("venta") or row.get("compra")
+        if fuente != "dolarhoy":
+            row = fetch_fx_rate(fecha_str, "ccl", "dolarhoy")
+            if row:
+                return row.get("venta") or row.get("compra")
+            row = fetch_fx_rate_on_or_before(fecha_str, "ccl", "dolarhoy")
+            if row:
+                return row.get("venta") or row.get("compra")
+        return None
+
+
+    def update_default_fx_rate(self):
+        today = datetime.now()
+        rate = self.get_fx_rate_for_date(today, "Acciones AR")
+        if rate:
+            self.default_fx_rate = rate
 
     def configure_user_portfolio_headers(self):
         view = self.user_portfolio_view
@@ -402,9 +850,13 @@ class PortfolioAppQt(QMainWindow):
             view.liquidity_chart_layout.addWidget(no_data_label)
             return
 
-        fig = Figure(figsize=(5, 4), dpi=100)
+        fig = Figure(figsize=(6, 3.5), dpi=100)
         ax = fig.add_subplot(111)
         colors = [self.get_broker_color(broker) for broker in labels]
+        chart_bg = self.get_theme_value("chart_bg", "#1b1f24")
+        chart_text = self.get_theme_value("chart_text", "#e6e6e6")
+        fig.patch.set_facecolor(chart_bg)
+        ax.set_facecolor(chart_bg)
 
         def pct_label(pct):
             return f"{pct:.1f}%" if pct >= 6 else ""
@@ -415,13 +867,19 @@ class PortfolioAppQt(QMainWindow):
             autopct=pct_label,
             startangle=90,
             colors=colors[:len(labels)],
-            textprops={'fontsize': 9}
+            textprops={'fontsize': 9, 'color': chart_text}
         )
-        ax.set_title(f'Distribución de liquidez en {view.liquidity_currency}', fontsize=12, pad=20)
-        fig.subplots_adjust(top=0.82)
+        ax.set_title(
+            f'Distribuci?n de liquidez en {view.liquidity_currency}',
+            fontsize=12,
+            pad=14,
+            color=chart_text,
+        )
+        fig.subplots_adjust(left=0.05, right=0.95, top=0.85, bottom=0.05)
         ax.axis('equal')
 
         canvas = FigureCanvasQTAgg(fig)
+        canvas.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
         view.liquidity_chart_layout.addWidget(canvas)
 
         total = sum(values) if values else 1
@@ -757,6 +1215,8 @@ class PortfolioAppQt(QMainWindow):
     def cargar_datos_mercado(self):
         try:
             self.df_mercado, self.last_update = load_market_data()
+            self.start_fx_update_thread(run_backfill=False)
+            self.update_default_fx_rate()
             if self.df_mercado is not None and self.last_update:
                 self.update_status_labels()
             if self.df_mercado is None:
@@ -813,6 +1273,9 @@ class PortfolioAppQt(QMainWindow):
         self.tipo_combo = QComboBox()
         self.tipo_combo.addItems(["Depósito ARS", "Depósito USD", "Plazo Fijo", "Acciones AR", "CEDEARs", "Bonos AR", "ETFs", "Criptomonedas", "FCIs AR", "Cauciones"])
         self.tipo_op_combo = QComboBox()
+        self.plazo_combo = QComboBox()
+        self.plazo_combo.addItems(["T+0", "T+1", "T+2"])
+        self.plazo_combo.setCurrentText("T+1")
         self.broker_combo = QComboBox()
         self.broker_combo.addItems(BROKERS)
         self.simbolo_combo = QComboBox()
@@ -822,6 +1285,8 @@ class PortfolioAppQt(QMainWindow):
         self.precio_edit = QLineEdit("0")
         self.rendimiento_edit = QLineEdit("0")
         self.tc_edit = QLineEdit("1.0")
+        self.ccl_edit = QLineEdit()
+        self.ccl_edit.setReadOnly(True)
 
         # Campos calculados
         self.total_sin_desc_label = QLineEdit()
@@ -853,20 +1318,24 @@ class PortfolioAppQt(QMainWindow):
         layout.addWidget(self.tipo_combo, 1, 1)
         layout.addWidget(QLabel("Tipo Operación*:"), 2, 0)
         layout.addWidget(self.tipo_op_combo, 2, 1)
-        layout.addWidget(QLabel("Broker*:"), 3, 0)
-        layout.addWidget(self.broker_combo, 3, 1)
-        layout.addWidget(QLabel("Símbolo:"), 4, 0)
-        layout.addWidget(self.simbolo_combo, 4, 1)
-        layout.addWidget(QLabel("Detalle:"), 5, 0)
-        layout.addWidget(self.detalle_edit, 5, 1)
-        layout.addWidget(QLabel("Cantidad*:"), 6, 0)
-        layout.addWidget(self.cantidad_edit, 6, 1)
-        layout.addWidget(QLabel("Precio*:"), 7, 0)
-        layout.addWidget(self.precio_edit, 7, 1)
-        layout.addWidget(QLabel("Rendimiento:"), 8, 0)
-        layout.addWidget(self.rendimiento_edit, 8, 1)
-        layout.addWidget(QLabel("TC USD/ARS:"), 9, 0)
-        layout.addWidget(self.tc_edit, 9, 1)
+        layout.addWidget(QLabel("Plazo:"), 3, 0)
+        layout.addWidget(self.plazo_combo, 3, 1)
+        layout.addWidget(QLabel("Broker*:"), 4, 0)
+        layout.addWidget(self.broker_combo, 4, 1)
+        layout.addWidget(QLabel("Símbolo:"), 5, 0)
+        layout.addWidget(self.simbolo_combo, 5, 1)
+        layout.addWidget(QLabel("Detalle:"), 6, 0)
+        layout.addWidget(self.detalle_edit, 6, 1)
+        layout.addWidget(QLabel("Cantidad*:"), 7, 0)
+        layout.addWidget(self.cantidad_edit, 7, 1)
+        layout.addWidget(QLabel("Precio*:"), 8, 0)
+        layout.addWidget(self.precio_edit, 8, 1)
+        layout.addWidget(QLabel("Rendimiento:"), 9, 0)
+        layout.addWidget(self.rendimiento_edit, 9, 1)
+        layout.addWidget(QLabel("Precio CCL:"), 10, 0)
+        layout.addWidget(self.ccl_edit, 10, 1)
+        layout.addWidget(QLabel("TC USD/ARS:"), 11, 0)
+        layout.addWidget(self.tc_edit, 11, 1)
 
         # Campos calculados
         layout.addWidget(QLabel("Total sin descuentos:"), 0, 2)
@@ -893,14 +1362,15 @@ class PortfolioAppQt(QMainWindow):
         button_layout.addWidget(self.calcular_btn)
         button_layout.addWidget(self.guardar_btn)
         button_layout.addWidget(self.limpiar_btn)
-        layout.addLayout(button_layout, 10, 0, 1, 4)
+        layout.addLayout(button_layout, 12, 0, 1, 4)
 
-        layout.addWidget(QLabel("* Campos obligatorios"), 11, 0, 1, 4)
+        layout.addWidget(QLabel("* Campos obligatorios"), 13, 0, 1, 4)
 
         # Conectar señales
         self.tipo_combo.currentTextChanged.connect(self.on_tipo_change)
         self.tipo_op_combo.currentTextChanged.connect(self.on_tipo_op_change)
         self.broker_combo.currentTextChanged.connect(self.on_broker_change)
+        self.fecha_edit.dateChanged.connect(self.on_fecha_change)
         self.cantidad_edit.textChanged.connect(self.calcular_on_change)
         self.precio_edit.textChanged.connect(self.calcular_on_change)
         self.rendimiento_edit.textChanged.connect(self.calcular_on_change)
@@ -912,6 +1382,15 @@ class PortfolioAppQt(QMainWindow):
 
         # Inicializar estado
         self.on_tipo_change(self.tipo_combo.currentText())
+        self.update_ccl_display()
+
+    def update_ccl_display(self):
+        fecha_dt = datetime.combine(self.fecha_edit.date().toPyDate(), datetime.min.time())
+        rate = self.get_ccl_rate_for_date(fecha_dt)
+        if rate is None:
+            self.ccl_edit.setText("-")
+        else:
+            self.ccl_edit.setText(str(rate))
 
     def on_tipo_change(self, tipo):
         # Limpiar y configurar combo de tipo de operación
@@ -934,7 +1413,9 @@ class PortfolioAppQt(QMainWindow):
             self.rendimiento_edit.setText("0")
             self.rendimiento_edit.setEnabled(False)
             self.tc_edit.setEnabled(True)
-            self.tc_edit.setText(str(getattr(self, "default_fx_rate", 1.0)))
+            fecha_dt = datetime.combine(self.fecha_edit.date().toPyDate(), datetime.min.time())
+            fx_rate = self.get_fx_rate_for_date(fecha_dt, "Acciones AR") or getattr(self, "default_fx_rate", 1.0)
+            self.tc_edit.setText(str(fx_rate))
         elif tipo == "Plazo Fijo":
             self.tipo_op_combo.addItems(["Compra", "Venta"])
             self.precio_edit.setText("1")
@@ -942,23 +1423,34 @@ class PortfolioAppQt(QMainWindow):
             self.rendimiento_edit.setEnabled(True)
             self.tc_edit.setText("1.0")
             self.tc_edit.setEnabled(False)
-        elif tipo in ["Acciones AR", "CEDEARs", "Bonos AR","ETFs" , "Criptomonedas", "FCIs AR", "Cauciones"]:
+        elif tipo in ["Acciones AR", "CEDEARs", "Bonos AR", "ETFs", "Criptomonedas", "FCIs AR", "Cauciones"]:
             self.tipo_op_combo.addItems(["Compra", "Venta", "Rendimiento"])
             self.precio_edit.setEnabled(True)
             self.rendimiento_edit.setEnabled(True)
+            requires_fx = True
             moneda = self.get_moneda_actual(tipo)
-            if moneda == "USD":
+            if moneda == "USD" or requires_fx:
                 self.tc_edit.setEnabled(True)
-                self.tc_edit.setText(str(getattr(self, "default_fx_rate", 1.0)))
+                fecha_dt = datetime.combine(self.fecha_edit.date().toPyDate(), datetime.min.time())
+                fx_rate = self.get_fx_rate_for_date(fecha_dt, tipo) or getattr(self, "default_fx_rate", 1.0)
+                self.tc_edit.setText(str(fx_rate))
             else:
                 self.tc_edit.setEnabled(False)
                 self.tc_edit.setText("1.0")
+            if tipo == "Criptomonedas":
+                self.plazo_combo.setCurrentText("T+0")
+                self.plazo_combo.setEnabled(False)
+            else:
+                self.plazo_combo.setEnabled(True)
+                if not self.plazo_combo.currentText():
+                    self.plazo_combo.setCurrentText("T+1")
         else:
             self.tipo_op_combo.addItems(["Compra", "Venta"])
             self.precio_edit.setEnabled(True)
             self.rendimiento_edit.setEnabled(True)
             self.tc_edit.setEnabled(False)
             self.tc_edit.setText("1.0")
+            self.plazo_combo.setEnabled(True)
 
         self.update_simbolo_combobox()
         self.calcular_on_change()
@@ -966,6 +1458,15 @@ class PortfolioAppQt(QMainWindow):
     def on_broker_change(self, _):
         """Actualizar símbolos disponibles y re-cálculos cuando cambia el broker."""
         self.update_simbolo_combobox()
+        self.calcular_on_change()
+
+    def on_fecha_change(self, _):
+        tipo = self.tipo_combo.currentText()
+        if self.tc_edit.isEnabled():
+            fecha_dt = datetime.combine(self.fecha_edit.date().toPyDate(), datetime.min.time())
+            fx_rate = self.get_fx_rate_for_date(fecha_dt, tipo) or getattr(self, "default_fx_rate", 1.0)
+            self.tc_edit.setText(str(fx_rate))
+        self.update_ccl_display()
         self.calcular_on_change()
 
     def update_simbolo_combobox(self):
@@ -1104,8 +1605,26 @@ class PortfolioAppQt(QMainWindow):
             cantidad = float(self.cantidad_edit.text().replace(',', '.')) if self.cantidad_edit.text() else 0
             precio = float(self.precio_edit.text().replace(',', '.')) if self.precio_edit.text() else 0
             rendimiento = float(self.rendimiento_edit.text().replace(',', '.')) if self.rendimiento_edit.text() else 0
+            moneda = self.get_moneda_actual(tipo)
+            tc_usd_ars = float(self.tc_edit.text().replace(',', '.')) if self.tc_edit.text() else 1.0
+            fecha_dt = datetime.combine(self.fecha_edit.date().toPyDate(), datetime.min.time())
+            simbolo = self.simbolo_combo.currentText()
+            plazo = self.plazo_combo.currentText() or "T+1"
+            bmb_tier = self.compute_bmb_tier(broker, fecha_dt)
+            intraday_bonus = self.is_intraday_bonus(
+                broker, tipo, tipo_op, simbolo, cantidad, moneda, plazo, fecha_dt
+            )
 
-            op = calcular_operacion(tipo, tipo_op, cantidad, precio, rendimiento, broker)
+            op = calcular_operacion(
+                tipo,
+                tipo_op,
+                cantidad,
+                precio,
+                rendimiento,
+                broker,
+                bmb_tier=bmb_tier,
+                intraday_bonus=intraday_bonus,
+            )
 
             def format_number(num):
                 return f"{num:,.2f}".replace(',', 'X').replace('.', ',').replace('X', '.')
@@ -1155,6 +1674,23 @@ class PortfolioAppQt(QMainWindow):
             simbolo = self.simbolo_combo.currentText()
             detalle = self.detalle_edit.text()
             broker = self.broker_combo.currentText() or "GENERAL"
+            fecha_dt = datetime.combine(self.fecha_edit.date().toPyDate(), datetime.min.time())
+
+            plazo = self.plazo_combo.currentText() or "T+1"
+            bmb_tier = self.compute_bmb_tier(broker, fecha_dt)
+            intraday_bonus = self.is_intraday_bonus(
+                broker, tipo, tipo_op, simbolo, cantidad, moneda, plazo, fecha_dt
+            )
+            op = calcular_operacion(
+                tipo,
+                tipo_op,
+                cantidad,
+                precio,
+                rendimiento,
+                broker,
+                bmb_tier=bmb_tier,
+                intraday_bonus=intraday_bonus,
+            )
 
             # Validar cantidad para ventas (por broker)
             if tipo_op == "Venta":
@@ -1172,15 +1708,15 @@ class PortfolioAppQt(QMainWindow):
                     return
 
             # Obtener valores calculados
-            total_sin_desc = float(self.total_sin_desc_label.text().replace('.', '').replace(',', '.')) if self.total_sin_desc_label.text() else 0
-            comision = float(self.comision_edit.text().replace('.', '').replace(',', '.')) if self.comision_edit.text() else 0
-            iva_basico = float(self.iva_label.text().replace('.', '').replace(',', '.')) if self.iva_label.text() else 0
-            derechos = float(self.derechos_edit.text().replace('.', '').replace(',', '.')) if self.derechos_edit.text() else 0
-            iva_derechos = float(self.iva_derechos_label.text().replace('.', '').replace(',', '.')) if self.iva_derechos_label.text() else 0
-            total_descuentos = float(self.total_descuentos_label.text().replace('.', '').replace(',', '.')) if self.total_descuentos_label.text() else 0
-            costo_total = float(self.costo_total_label.text().replace('.', '').replace(',', '.')) if self.costo_total_label.text() else 0
-            ingreso_total = float(self.ingreso_total_label.text().replace('.', '').replace(',', '.')) if self.ingreso_total_label.text() else 0
-            balance = float(self.balance_label.text().replace('.', '').replace(',', '.')) if self.balance_label.text() else 0
+            total_sin_desc = op["total_sin_desc"]
+            comision = op["comision"]
+            iva_basico = op["iva_basico"]
+            derechos = op["derechos"]
+            iva_derechos = op["iva_derechos"]
+            total_descuentos = op["total_descuentos"]
+            costo_total = op["costo_total"]
+            ingreso_total = op["ingreso_total"]
+            balance = op["balance"]
 
             # Validar liquidez por broker (solo egresos netos)
             delta_cash = ingreso_total - costo_total
@@ -1205,6 +1741,7 @@ class PortfolioAppQt(QMainWindow):
                 'tipo_operacion': tipo_op,
                 'simbolo': simbolo,
                 'detalle': detalle,
+                'plazo': plazo,
                 'cantidad': cantidad,
                 'precio': precio,
                 'rendimiento': rendimiento,
@@ -1257,6 +1794,7 @@ class PortfolioAppQt(QMainWindow):
     def limpiar_formulario(self):
         self.tipo_combo.setCurrentIndex(0)
         self.tipo_op_combo.clear()
+        self.plazo_combo.setCurrentText("T+1")
         self.simbolo_combo.clear()
         self.broker_combo.setCurrentIndex(0)
         self.detalle_edit.clear()
@@ -1502,7 +2040,7 @@ class PortfolioAppQt(QMainWindow):
 
     def detect_fx_rate(self):
         """Intenta obtener un tipo de cambio MEP desde los datos de mercado usando AL30/AL30D"""
-        fx_rate = 1.0
+        fx_rate = self.get_fx_rate_for_date(datetime.now(), "Acciones AR") or 1.0
         if self.df_mercado is not None:
             symbol_col = next((c for c in ["Símbolo.1", "Símbolo", "Simbolo", "Symbol", "Ticker"] if c in self.df_mercado.columns), None)
             price_col = next((c for c in ["Último Operado", "Ultimo Operado", "Precio", "Close"] if c in self.df_mercado.columns), None)
@@ -1756,32 +2294,36 @@ class PortfolioAppQt(QMainWindow):
                         match = pd.DataFrame()
 
                     if not match.empty:
-                        try:
-                            ultimo_operado = match.iloc[0].get(price_col)
-                            if isinstance(ultimo_operado, str):
-                                ultimo_operado = ultimo_operado.replace('.', '').replace(',', '.')
-                            if item['tipo'] == "Bonos AR":
-                                item['precio_actual'] = float(ultimo_operado) * 0.01
-                            else:
-                                item['precio_actual'] = float(ultimo_operado)
-                        except Exception:
-                            item['precio_actual'] = None
-
-                        if var_col:
                             try:
-                                variacion = match.iloc[0].get(var_col)
-                                if isinstance(variacion, str):
-                                    variacion = variacion.replace('%', '').replace(',', '.').strip()
-                                    if variacion.endswith('%'):
-                                        variacion = variacion[:-1]
-                                item['variacion_diaria'] = float(variacion) if variacion not in (None, "") else None
+                                ultimo_operado = match.iloc[0].get(price_col)
+                                if isinstance(ultimo_operado, str):
+                                    ultimo_operado = ultimo_operado.replace('.', '').replace(',', '.')
+                                ultimo_operado = self._safe_number(ultimo_operado, None)
+                                if ultimo_operado is None:
+                                    item['precio_actual'] = None
+                                elif item['tipo'] == "Bonos AR":
+                                    item['precio_actual'] = ultimo_operado * 0.01
+                                else:
+                                    item['precio_actual'] = ultimo_operado
                             except Exception:
-                                item['variacion_diaria'] = None
+                                item['precio_actual'] = None
+
+                            if var_col:
+                                try:
+                                    variacion = match.iloc[0].get(var_col)
+                                    if isinstance(variacion, str):
+                                        variacion = variacion.replace('%', '').replace(',', '.').strip()
+                                        if variacion.endswith('%'):
+                                            variacion = variacion[:-1]
+                                    item['variacion_diaria'] = self._safe_number(variacion, None)
+                                except Exception:
+                                    item['variacion_diaria'] = None
 
                 if item['precio_actual'] is not None:
                     item['valor_actual'] = item['cantidad'] * item['precio_actual']
                 else:
                     item['valor_actual'] = item['valor_compra']
+                item['valor_actual'] = self._safe_number(item['valor_actual'], item['valor_compra'])
 
                 item['diferencia_valor'] = item['valor_actual'] - item['valor_compra']
 
@@ -1813,15 +2355,19 @@ class PortfolioAppQt(QMainWindow):
             # Acumular valor actual para calcular el total
             # Valores convertidos
             if item['tipo'] == "Efectivo":
-                valor_ars = item.get('monto_ars', 0.0)
-                valor_usd = item.get('monto_usd', 0.0)
+                valor_ars = self._safe_number(item.get('monto_ars', 0.0), 0.0)
+                valor_usd = self._safe_number(item.get('monto_usd', 0.0), 0.0)
             else:
                 if moneda_item == "USD":
-                    valor_ars = item['valor_actual'] * fx_rate
-                    valor_usd = item['valor_actual']
+                    valor_ars = self._safe_number(item['valor_actual'], 0.0) * fx_rate
+                    valor_usd = self._safe_number(item['valor_actual'], 0.0)
                 else:
-                    valor_ars = item['valor_actual']
-                    valor_usd = item['valor_actual'] / fx_rate if fx_rate != 0 else item['valor_actual']
+                    valor_ars = self._safe_number(item['valor_actual'], 0.0)
+                    valor_usd = (
+                        self._safe_number(item['valor_actual'], 0.0) / fx_rate
+                        if fx_rate
+                        else self._safe_number(item['valor_actual'], 0.0)
+                    )
             item['valor_ars'] = valor_ars
             item['valor_usd'] = valor_usd
 
@@ -2206,9 +2752,9 @@ class PortfolioAppQt(QMainWindow):
 
         # Tabla
         self.journal_table = QTableWidget()
-        self.journal_table.setColumnCount(19)
+        self.journal_table.setColumnCount(21)
         self.journal_table.setHorizontalHeaderLabels([
-            "Fecha", "Tipo", "Operación", "Símbolo", "Detalle",
+            "Fecha", "Tipo", "Operación", "Símbolo", "Detalle", "Plazo",
             "Broker", "Cantidad", "Precio", "Rendimiento", "Total", "Comisión",
             "IVA", "Derechos", "IVA Der", "Desc Total",
             "Costo", "Ingreso", "Balance", "Moneda", "TC USD/ARS"
@@ -2240,7 +2786,7 @@ class PortfolioAppQt(QMainWindow):
 
         rows = fetch_journal()
         headers = [
-            "id", "fecha", "tipo", "tipo_operacion", "simbolo", "detalle",
+            "id", "fecha", "tipo", "tipo_operacion", "simbolo", "detalle", "plazo",
             "cantidad", "precio", "rendimiento", "total_sin_desc", "comision",
             "iva_21", "derechos", "iva_derechos", "total_descuentos",
             "costo_total", "ingreso_total", "balance", "broker", "moneda", "tc_usd_ars"

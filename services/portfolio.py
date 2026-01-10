@@ -301,7 +301,12 @@ def calcular_descuentos_y_totales(comision: float, derechos: float) -> dict:
     }
 
 
-def _rates_por_broker(broker: str, tipo: str, tipo_op: str) -> tuple[float, float]:
+def _rates_por_broker(
+    broker: str,
+    tipo: str,
+    tipo_op: str,
+    bmb_tier: str | None = None,
+) -> tuple[float, float]:
     """
     Retorna (comisión%, derechos%) según broker/instrumento.
     Tasas expresadas en proporción (0.005 == 0.5%).
@@ -338,7 +343,114 @@ def _rates_por_broker(broker: str, tipo: str, tipo_op: str) -> tuple[float, floa
             return iol_rates[tipo]
         return default_comm, default_derechos
 
+    if broker == "BMB":
+        tier = (bmb_tier or "digital").lower()
+        bmb_rates = {
+            "digital": {
+                "ACCIONES AR": 0.005,
+                "CEDEARS": 0.005,
+                "BONOS AR": 0.005,
+                "OPCIONES": 0.005,
+                "EJERCICIOS": 0.005,
+                "FUTUROS": 0.005,
+                "LICITACIONES": 0.0025,
+                "FCIS AR": 0.0,
+                "FCIS": 0.0,
+            },
+            "active_trader": {
+                "ACCIONES AR": 0.0025,
+                "CEDEARS": 0.0025,
+                "BONOS AR": 0.0025,
+                "OPCIONES": 0.0025,
+                "EJERCICIOS": 0.0025,
+                "FUTUROS": 0.001,
+                "LICITACIONES": 0.001,
+                "FCIS AR": 0.0,
+                "FCIS": 0.0,
+            },
+            "active_trader_plus": {
+                "ACCIONES AR": 0.001,
+                "CEDEARS": 0.001,
+                "BONOS AR": 0.001,
+                "OPCIONES": 0.001,
+                "EJERCICIOS": 0.001,
+                "FUTUROS": 0.001,
+                "LICITACIONES": 0.001,
+                "FCIS AR": 0.0,
+                "FCIS": 0.0,
+            },
+        }
+        tier_rates = bmb_rates.get(tier, bmb_rates["digital"])
+        if tipo in tier_rates:
+            return tier_rates[tipo], 0.0
+        return default_comm, default_derechos
+
     return default_comm, default_derechos
+
+
+def _parse_journal_date(value) -> Optional[datetime]:
+    if isinstance(value, datetime):
+        return value
+    if not value:
+        return None
+    text = str(value).strip()
+    for fmt in ("%Y-%m-%d", "%d/%m/%Y", "%Y/%m/%d"):
+        try:
+            return datetime.strptime(text, fmt)
+        except Exception:
+            continue
+    try:
+        return datetime.fromisoformat(text)
+    except Exception:
+        return None
+
+
+def compute_bmb_monthly_volume(
+    journal_rows: Iterable[dict],
+    target_date: datetime,
+    include_row: Optional[dict] = None,
+) -> float:
+    eligible_types = {"ACCIONES AR", "CEDEARS", "BONOS AR", "OPCIONES", "EJERCICIOS"}
+    total = 0.0
+
+    def add_row(row: dict) -> None:
+        nonlocal total
+        if (row.get("broker") or "").upper() != "BMB":
+            return
+        tipo = (row.get("tipo") or "").upper()
+        tipo_op = (row.get("tipo_operacion") or "").upper()
+        if tipo not in eligible_types:
+            return
+        if tipo_op not in ("COMPRA", "VENTA"):
+            return
+        total_sin_desc = _to_float(row.get("total_sin_desc", 0))
+        if total_sin_desc == 0:
+            total_sin_desc = _to_float(row.get("cantidad", 0)) * _to_float(row.get("precio", 0))
+        moneda = (row.get("moneda") or "ARS").upper()
+        if moneda == "USD":
+            tc = _to_float(row.get("tc_usd_ars", 0)) or 1.0
+            total_sin_desc *= tc
+        total += total_sin_desc
+
+    for row in journal_rows:
+        fecha = _parse_journal_date(row.get("fecha"))
+        if not fecha:
+            continue
+        if fecha.year == target_date.year and fecha.month == target_date.month:
+            add_row(row)
+
+    if include_row:
+        add_row(include_row)
+
+    return total
+
+
+def get_bmb_tier(volume_ars: float) -> str:
+    if volume_ars >= 25_000_000:
+        return "active_trader_plus"
+    if volume_ars >= 5_000_000:
+        return "active_trader"
+    return "digital"
 
 
 def calcular_operacion(
@@ -348,10 +460,14 @@ def calcular_operacion(
     precio: float,
     rendimiento: float,
     broker: str = "",
+    bmb_tier: str | None = None,
+    intraday_bonus: bool = False,
 ) -> dict:
     total_sin_desc = cantidad * precio + rendimiento
-    comm_rate, der_rate = _rates_por_broker(broker, tipo, tipo_op)
+    comm_rate, der_rate = _rates_por_broker(broker, tipo, tipo_op, bmb_tier=bmb_tier)
     comision = comm_rate * total_sin_desc
+    if intraday_bonus:
+        comision *= 0.5
     derechos = der_rate * total_sin_desc
 
     descuentos = calcular_descuentos_y_totales(comision, derechos)
